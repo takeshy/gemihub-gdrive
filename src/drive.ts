@@ -166,13 +166,20 @@ export async function writeSyncMeta(api: PluginAPI, accessToken: string, rootFol
     expected.lastUpdatedAt = new Date().toISOString();
     const matches = await findAllByName(api, accessToken, rootFolderId, "_sync-meta.json");
     const nativeFiles: SyncMeta["files"] = {};
+    const previousEntries: SyncMeta["files"] = {};
     for (const match of matches) {
       try {
         const current = JSON.parse((await readRemote(api, accessToken, match.id)).text) as SyncMeta;
-        Object.assign(nativeFiles, Object.fromEntries(Object.entries(current.files ?? {}).filter(([, item]) => isGoogleWorkspaceFile(item))));
+        for (const [id, item] of Object.entries(current.files ?? {})) {
+          if (isGoogleWorkspaceFile(item)) nativeFiles[id] = item;
+          else previousEntries[id] = { ...previousEntries[id], ...item };
+        }
       } catch { /* overwrite malformed or unreadable duplicate metadata */ }
     }
-    const content = JSON.stringify({ ...expected, files: { ...nativeFiles, ...expected.files } }, null, 2);
+    // GemiHub keeps sharing state (shared/webViewLink) only inside _sync-meta.json,
+    // so entries rebuilt from the Drive listing must carry the current fields over.
+    const files = Object.fromEntries(Object.entries(expected.files).map(([id, file]) => [id, { ...previousEntries[id], ...file }]));
+    const content = JSON.stringify({ ...expected, files: { ...nativeFiles, ...files } }, null, 2);
     if (matches.length) await Promise.all(matches.map((match) => updateRemote(api, accessToken, match.id, content, "application/json")));
     else await createRemote(api, accessToken, rootFolderId, "_sync-meta.json", content, "application/json");
 

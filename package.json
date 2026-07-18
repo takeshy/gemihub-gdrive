@@ -6,7 +6,7 @@
   "scripts": {
     "build": "esbuild src/index.tsx --bundle --format=cjs --platform=browser --target=es2022 --jsx=transform --jsx-factory=React.createElement --external:react --external:react-dom --external:react-dom/client --outfile=main.js",
     "check": "tsc --noEmit",
-    "test": "deno test src/auth.test.ts src/sync.test.ts"
+    "test": "deno test src/auth.test.ts src/sync.test.ts src/drive.test.ts"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",

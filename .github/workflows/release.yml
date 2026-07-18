@@ -28,6 +28,15 @@ jobs:
         id: version
         run: echo "version=v$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
+      - name: Verify manifest.json version matches package.json
+        run: |
+          manifest="$(node -p "require('./manifest.json').version")"
+          package="$(node -p "require('./package.json').version")"
+          if [ "$manifest" != "$package" ]; then
+            echo "manifest.json version ($manifest) != package.json version ($package)" >&2
+            exit 1
+          fi
+
       - name: Check if release exists
         id: check_release
         env:

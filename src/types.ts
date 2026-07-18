@@ -26,6 +26,8 @@ export interface FileSyncMeta {
   md5Checksum: string;
   modifiedTime: string;
   createdTime?: string;
+  shared?: boolean;
+  webViewLink?: string;
   size?: string;
 }
 

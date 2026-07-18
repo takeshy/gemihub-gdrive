@@ -33,7 +33,10 @@ function previewBlockReason(status: SyncStatus, direction: PreviewDirection): st
 }
 
 export function DriveSyncView({ api }: { api: PluginAPI }) {
-  const client = useMemo(() => new ProjectDriveSync(api), [api]);
+  const client = useMemo(() => {
+    try { return new ProjectDriveSync(api); }
+    catch (error) { return error instanceof Error ? error.message : String(error); }
+  }, [api]);
   const [connection, setConnection] = useState<Awaited<ReturnType<ProjectDriveSync["connection"]>>>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [token, setToken] = useState("");
@@ -44,7 +47,15 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [preview, setPreview] = useState<PreviewDirection | null>(null);
 
-  useEffect(() => { void client.connection().then(setConnection).catch((error) => setMessage(String(error))); }, [client]);
+  useEffect(() => {
+    if (typeof client === "string") return;
+    void client.connection().then(setConnection).catch((error) => setMessage(String(error)));
+  }, [client]);
+
+  if (typeof client === "string") return <section className="gdrive-sync">
+    <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible project sync</small></div></header>
+    <p className="gdrive-message danger">{client}</p>
+  </section>;
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setMessage(""); setProgress(null);

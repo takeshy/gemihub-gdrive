@@ -8,7 +8,7 @@ const TEXT_MIME = new Set(["application/json", "application/javascript", "applic
 
 function mimeType(path: string): string {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
-  return ({ md: "text/markdown", markdown: "text/markdown", txt: "text/plain", json: "application/json", html: "text/html", css: "text/css", js: "application/javascript", ts: "text/typescript", yaml: "application/x-yaml", yml: "application/x-yaml", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", epub: "application/epub+zip" } as Record<string, string>)[extension] ?? "application/octet-stream";
+  return ({ md: "text/markdown", markdown: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json", html: "text/html", css: "text/css", js: "application/javascript", ts: "text/typescript", xml: "application/xml", yaml: "application/x-yaml", yml: "application/x-yaml", base: "text/plain", kanban: "text/plain", dashboard: "text/plain", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", epub: "application/epub+zip" } as Record<string, string>)[extension] ?? "application/octet-stream";
 }
 
 function decodeDataURL(value: string): ArrayBuffer {
@@ -68,6 +68,26 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
   });
   await Promise.all(runners);
   if (failure !== undefined) throw failure;
+}
+
+export interface PushAction { local: ProjectFile; id: string | undefined; rename: boolean; upload: "create" | "update" | null }
+
+export function planPush(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
+  const localIds = resolveLocalIds(inventory, baseline);
+  return inventory.map((local) => {
+    let id = localIds.get(local.path);
+    if (!id) {
+      const sameRemote = Object.entries(remote.files).filter(([, file]) => file.name === local.path && file.md5Checksum === local.md5);
+      if (sameRemote.length === 1) id = sameRemote[0][0];
+    }
+    // For untracked files adopted through a name+checksum match the remote file
+    // itself is the last known state; comparing against the (empty) baseline
+    // would re-upload and re-name identical content on the first push.
+    const known = id ? baseline.files[id] ?? remote.files[id] : undefined;
+    const rename = !!id && !!remote.files[id] && !!known && known.name !== local.path;
+    const upload: PushAction["upload"] = id && known && known.md5Checksum === local.md5 ? null : id && remote.files[id] ? "update" : "create";
+    return { local, id, rename, upload };
+  });
 }
 
 export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
@@ -178,24 +198,19 @@ export class ProjectDriveSync {
     if (status.localDeletes.length && !allowDeletes) throw new Error(`Push will move ${status.localDeletes.length} remote file(s) to GemiHub trash. Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const renamedIds = new Set<string>();
-    const localIds = resolveLocalIds(inventory, baseline);
-    for (const local of inventory) {
-      let id = localIds.get(local.path);
-      if (!id) {
-        const sameRemote = Object.entries(remote.files).filter(([, file]) => file.name === local.path && file.md5Checksum === local.md5);
-        if (sameRemote.length === 1) id = sameRemote[0][0];
-      }
-      if (id && remote.files[id] && baseline.files[id]?.name !== local.path) {
+    for (const action of planPush(inventory, baseline, remote)) {
+      const { local, id } = action;
+      if (action.rename && id) {
         await renameRemote(this.api, session.accessToken, id, local.path);
         renamedIds.add(id); summary.renamed++;
       }
-      if (id && baseline.files[id]?.md5Checksum === local.md5) {
-        if (!renamedIds.has(id)) summary.skipped++;
+      if (!action.upload) {
+        if (!id || !renamedIds.has(id)) summary.skipped++;
         continue;
       }
       const raw = await this.api.projectFiles!.read(local.path);
       const content = local.binary ? decodeDataURL(raw) : raw;
-      if (id && remote.files[id]) { await updateRemote(this.api, session.accessToken, id, content, mimeType(local.path)); summary.updated++; }
+      if (action.upload === "update" && id) { await updateRemote(this.api, session.accessToken, id, content, mimeType(local.path)); summary.updated++; }
       else { await createRemote(this.api, session.accessToken, session.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
     }
     if (status.localDeletes.length) {

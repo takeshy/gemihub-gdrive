@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeStatus, parallelForEach } from "./sync.ts";
+import { computeStatus, parallelForEach, planPush } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, ProjectFile, SyncMeta } from "./types.ts";
 
@@ -60,6 +60,28 @@ Deno.test("recognizes already-applied remote state after an interrupted pull", (
   assertEquals(status.conflicts, []);
   assertEquals(status.localChanges, []);
   assertEquals(status.remoteChanges, []);
+});
+
+Deno.test("push adopts identical untracked files without re-upload or rename", () => {
+  const empty: LocalSyncMeta = { projectId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
+  assertEquals(planPush([local("notes/a.md", "a")], empty, remote()), [
+    { local: local("notes/a.md", "a"), id: "id", rename: false, upload: null },
+  ]);
+});
+
+Deno.test("push plans renames, updates, creates, and skips from the tracked baseline", () => {
+  assertEquals(planPush([local("notes/renamed.md", "a")], baseline(), remote()), [
+    { local: local("notes/renamed.md", "a"), id: "id", rename: true, upload: null },
+  ]);
+  assertEquals(planPush([local("notes/a.md", "b")], baseline(), remote()), [
+    { local: local("notes/a.md", "b"), id: "id", rename: false, upload: "update" },
+  ]);
+  assertEquals(planPush([local("new.md", "x")], baseline("other"), remote("other")), [
+    { local: local("new.md", "x"), id: undefined, rename: false, upload: "create" },
+  ]);
+  assertEquals(planPush([local("notes/a.md", "a")], baseline(), remote()), [
+    { local: local("notes/a.md", "a"), id: "id", rename: false, upload: null },
+  ]);
 });
 
 Deno.test("excludes Google Workspace native files but keeps exported binary files", () => {
