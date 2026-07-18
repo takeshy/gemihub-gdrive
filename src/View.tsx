@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ProjectDriveSync } from "./sync";
-import type { PluginAPI, SyncStatus, SyncSummary } from "./types";
+import type { PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -19,13 +19,14 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [progress, setProgress] = useState<SyncProgress | null>(null);
 
   useEffect(() => { void client.connection().then(setConnection).catch((error) => setMessage(String(error))); }, [client]);
 
   const run = async (action: () => Promise<void>) => {
-    setBusy(true); setMessage("");
+    setBusy(true); setMessage(""); setProgress(null);
     try { await action(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setProgress(null); }
   };
 
   const refresh = async () => {
@@ -45,7 +46,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const next = await client.status(); setStatus(next);
     const deletions = next.remoteDeletes.length;
     if (deletions && !window.confirm(`Pull will delete ${deletions} local project file(s). Continue?`)) return;
-    setMessage(`Pull complete: ${summary(await client.pull(deletions > 0))}`);
+    setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
     setStatus(await client.status());
   };
 
@@ -77,7 +78,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       </div>
       <small>GemiHubと同じ `_sync-meta.json` を使用します。初回に両側へ異なるファイルがある場合は Pull → Push の順で統合してください。</small>
     </div>}
-    {busy && <p className="gdrive-message">Working…</p>}
+    {busy && <p className="gdrive-message">{progress ? `${progress.phase === "pull" ? "Pull" : progress.phase === "delete" ? "Delete" : "Snapshot"} ${progress.completed} / ${progress.total}${progress.path ? `: ${progress.path}` : ""}` : "Working…"}</p>}
     {message && <p className="gdrive-message">{message}</p>}
   </section>;
 }

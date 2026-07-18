@@ -1,5 +1,3 @@
-import type React from "react";
-
 export interface Project { id: string; name: string; path: string }
 export interface ProjectFile { path: string; size: number; createdTime: number; modTime: number; md5: string; binary: boolean }
 export interface HTTPRequest { url: string; method?: string; headers?: Record<string, string>; body?: string; bodyBase64?: string }
@@ -7,7 +5,7 @@ export interface HTTPResponse { status: number; headers: Record<string, string>;
 
 export interface PluginAPI {
   language: string;
-  registerView(view: { id: string; name: string; icon?: string; location: "sidebar" | "main"; component: React.ComponentType<{ api: PluginAPI }> }): void;
+  registerView(view: { id: string; name: string; icon?: string; location: "sidebar" | "main"; component: (props: { api: PluginAPI }) => unknown }): void;
   projectFiles?: {
     current(): Promise<Project | null>;
     inventory(): Promise<ProjectFile[]>;
@@ -50,3 +48,4 @@ export interface SyncStatus {
 }
 
 export interface SyncSummary { created: number; updated: number; renamed: number; deleted: number; skipped: number }
+export interface SyncProgress { phase: "pull" | "delete" | "snapshot"; completed: number; total: number; path?: string }

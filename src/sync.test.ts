@@ -1,6 +1,7 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeStatus } from "./sync.ts";
+import { computeStatus, parallelForEach } from "./sync.ts";
+import { isGoogleWorkspaceFile, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, ProjectFile, SyncMeta } from "./types.ts";
 
 const local = (path: string, md5: string): ProjectFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
@@ -19,4 +20,22 @@ Deno.test("classifies a checksum-preserving local rename without a delete", () =
   const status = computeStatus([local("notes/renamed.md", "a")], baseline(), remote());
   assertEquals(status.localChanges, ["notes/renamed.md"]);
   assertEquals(status.localDeletes, []);
+});
+
+Deno.test("excludes Google Workspace native files but keeps exported binary files", () => {
+  assertEquals(isGoogleWorkspaceFile({ mimeType: "application/vnd.google-apps.presentation" }), true);
+  assertEquals(syncableDriveFile({ name: "Planning", mimeType: "application/vnd.google-apps.document" }), false);
+  assertEquals(syncableDriveFile({ name: "Budget", mimeType: "application/vnd.google-apps.spreadsheet" }), false);
+  assertEquals(syncableDriveFile({ name: "Planning.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }), true);
+});
+
+Deno.test("pull worker pool limits concurrency", async () => {
+  let active = 0, maximum = 0, completed = 0;
+  await parallelForEach(Array.from({ length: 17 }, (_, index) => index), async () => {
+    active++; maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active--; completed++;
+  }, 5);
+  assertEquals(maximum, 5);
+  assertEquals(completed, 17);
 });

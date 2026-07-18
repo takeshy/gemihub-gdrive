@@ -8,6 +8,14 @@ export const SYSTEM_PREFIXES = ["history/", "trash/", "sync_conflicts/", "__TEMP
 
 export interface DriveFile { id: string; name: string; mimeType: string; modifiedTime?: string; createdTime?: string; parents?: string[]; md5Checksum?: string; size?: string }
 
+export function isGoogleWorkspaceFile(file: Pick<DriveFile, "mimeType">): boolean {
+  return file.mimeType.startsWith("application/vnd.google-apps.");
+}
+
+export function syncableDriveFile(file: Pick<DriveFile, "name" | "mimeType">): boolean {
+  return syncablePath(file.name) && !isGoogleWorkspaceFile(file);
+}
+
 function escapeQuery(value: string): string { return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
 export function syncablePath(path: string): boolean {
   const clean = path.replace(/^\/+/, "");
@@ -42,7 +50,7 @@ export async function listRootFiles(api: PluginAPI, accessToken: string, rootFol
     files.push(...(body.files ?? []));
     pageToken = body.nextPageToken ?? "";
   } while (pageToken);
-  return files.filter((file) => file.mimeType !== "application/vnd.google-apps.folder");
+  return files.filter(syncableDriveFile);
 }
 
 export async function findByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile | null> {
@@ -100,7 +108,7 @@ export async function moveRemote(api: PluginAPI, accessToken: string, id: string
 export function metaFromFiles(files: DriveFile[]): SyncMeta {
   return {
     lastUpdatedAt: new Date().toISOString(),
-    files: Object.fromEntries(files.filter((file) => syncablePath(file.name)).map((file) => [file.id, {
+    files: Object.fromEntries(files.filter(syncableDriveFile).map((file) => [file.id, {
       name: file.name, mimeType: file.mimeType, md5Checksum: file.md5Checksum ?? "", modifiedTime: file.modifiedTime ?? "", createdTime: file.createdTime, size: file.size,
     } satisfies FileSyncMeta])),
   };
@@ -111,7 +119,7 @@ export async function readSyncMeta(api: PluginAPI, accessToken: string, rootFold
   if (file) {
     try {
       const parsed = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
-      parsed.files = Object.fromEntries(Object.entries(parsed.files ?? {}).filter(([, item]) => syncablePath(item.name)));
+      parsed.files = Object.fromEntries(Object.entries(parsed.files ?? {}).filter(([, item]) => syncableDriveFile(item)));
       return parsed;
     } catch { /* rebuild below */ }
   }
@@ -119,8 +127,16 @@ export async function readSyncMeta(api: PluginAPI, accessToken: string, rootFold
 }
 
 export async function writeSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string, meta: SyncMeta): Promise<void> {
-  const content = JSON.stringify(meta, null, 2);
   const file = await findByName(api, accessToken, rootFolderId, "_sync-meta.json");
+  let files = meta.files;
+  if (file) {
+    try {
+      const current = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
+      const nativeFiles = Object.fromEntries(Object.entries(current.files ?? {}).filter(([, item]) => isGoogleWorkspaceFile(item)));
+      files = { ...nativeFiles, ...files };
+    } catch { /* replace malformed metadata with the valid snapshot */ }
+  }
+  const content = JSON.stringify({ ...meta, files }, null, 2);
   if (file) await updateRemote(api, accessToken, file.id, content, "application/json");
   else await createRemote(api, accessToken, rootFolderId, "_sync-meta.json", content, "application/json");
 }

@@ -1,6 +1,6 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
 import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, syncablePath, updateRemote, writeSyncMeta } from "./drive";
-import type { LocalSyncMeta, PluginAPI, ProjectFile, SyncMeta, SyncStatus, SyncSummary } from "./types";
+import type { LocalSyncMeta, PluginAPI, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
@@ -22,6 +22,21 @@ function decodeDataURL(value: string): ArrayBuffer {
 function remoteIsBinary(mime: string): boolean { return !mime.startsWith("text/") && !TEXT_MIME.has(mime); }
 function emptySnapshot(projectId: string): LocalSyncMeta { return { projectId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
+
+export async function parallelForEach<T>(items: T[], worker: (item: T) => Promise<void>, concurrency = 5): Promise<void> {
+  let next = 0;
+  let failure: unknown;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (failure === undefined) {
+      const index = next++;
+      if (index >= items.length) return;
+      try { await worker(items[index]); }
+      catch (error) { failure = error; }
+    }
+  });
+  await Promise.all(runners);
+  if (failure !== undefined) throw failure;
+}
 
 export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -161,7 +176,7 @@ export class ProjectDriveSync {
     return summary;
   }
 
-  async pull(allowDeletes = false): Promise<SyncSummary> {
+  async pull(allowDeletes = false, onProgress?: (progress: SyncProgress) => void): Promise<SyncSummary> {
     const connection = await this.assertProject();
     const { session, inventory, baseline, remote, status } = await this.state();
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.join(", ")}`);
@@ -169,23 +184,42 @@ export class ProjectDriveSync {
     if (status.remoteDeletes.length && !allowDeletes) throw new Error(`Pull will delete ${status.remoteDeletes.length} local file(s). Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
-    for (const [id, file] of Object.entries(remote.files)) {
-      const previous = baseline.files[id];
-      let local = localByPath.get(file.name);
-      if (previous && previous.name !== file.name && localByPath.has(previous.name) && !local) {
-        await this.api.projectFiles!.rename(previous.name, file.name); summary.renamed++;
-        local = localByPath.get(previous.name);
+    const files = Object.entries(remote.files);
+    let completed = 0;
+    onProgress?.({ phase: "pull", completed, total: files.length });
+    await parallelForEach(files, async ([id, file]) => {
+      try {
+        const previous = baseline.files[id];
+        let local = localByPath.get(file.name);
+        if (previous && previous.name !== file.name && localByPath.has(previous.name) && !local) {
+          await this.api.projectFiles!.rename(previous.name, file.name); summary.renamed++;
+          local = localByPath.get(previous.name);
+        }
+        if (local?.md5 === file.md5Checksum) summary.skipped++;
+        else {
+          const content = await readRemote(this.api, session.accessToken, id);
+          const value = remoteIsBinary(file.mimeType) ? content.buffer : content.text;
+          if (local) { await this.api.projectFiles!.update(file.name, value); summary.updated++; }
+          else { await this.api.projectFiles!.create(file.name, value); summary.created++; }
+        }
+        completed++;
+        onProgress?.({ phase: "pull", completed, total: files.length, path: file.name });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Pull failed for ${file.name}: ${detail}`);
       }
-      if (local?.md5 === file.md5Checksum) { summary.skipped++; continue; }
-      const content = await readRemote(this.api, session.accessToken, id);
-      const value = remoteIsBinary(file.mimeType) ? content.buffer : content.text;
-      if (local) { await this.api.projectFiles!.update(file.name, value); summary.updated++; }
-      else { await this.api.projectFiles!.create(file.name, value); summary.created++; }
-    }
+    });
     if (status.remoteDeletes.length) {
-      for (const path of status.remoteDeletes) { await this.api.projectFiles!.delete(path); summary.deleted++; }
+      let deleted = 0;
+      onProgress?.({ phase: "delete", completed: deleted, total: status.remoteDeletes.length });
+      for (const path of status.remoteDeletes) {
+        await this.api.projectFiles!.delete(path); summary.deleted++; deleted++;
+        onProgress?.({ phase: "delete", completed: deleted, total: status.remoteDeletes.length, path });
+      }
     }
+    onProgress?.({ phase: "snapshot", completed: 0, total: 1 });
     await this.saveSnapshot(connection.project.id, remote, await this.inventory());
+    onProgress?.({ phase: "snapshot", completed: 1, total: 1 });
     return summary;
   }
 }
