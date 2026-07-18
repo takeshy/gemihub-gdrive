@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeStatus, parallelForEach, planPush } from "./sync.ts";
+import { computeSnapshot, computeStatus, parallelForEach, planPush } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, ProjectFile, SyncMeta } from "./types.ts";
 
@@ -11,9 +11,18 @@ const remote = (md5 = "a"): SyncMeta => ({ lastUpdatedAt: "", files: { id: { nam
 Deno.test("classifies local, remote, delete, and conflict changes", () => {
   assertEquals(computeStatus([local("notes/a.md", "b")], baseline(), remote()).localChanges, ["notes/a.md"]);
   assertEquals(computeStatus([local("notes/a.md", "a")], baseline(), remote("b")).remoteChanges, ["notes/a.md"]);
-  assertEquals(computeStatus([local("notes/a.md", "b")], baseline(), remote("c")).conflicts, ["notes/a.md"]);
+  assertEquals(computeStatus([local("notes/a.md", "b")], baseline(), remote("c")).conflicts, [
+    { path: "notes/a.md", id: "id", remoteName: "notes/a.md", kind: "edit" },
+  ]);
   assertEquals(computeStatus([], baseline(), remote()).localDeletes, ["notes/a.md"]);
   assertEquals(computeStatus([local("notes/a.md", "a")], baseline(), { lastUpdatedAt: "", files: {} }).remoteDeletes, ["notes/a.md"]);
+});
+
+Deno.test("classifies an untracked file that differs from a same-named remote file", () => {
+  const empty: LocalSyncMeta = { projectId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
+  assertEquals(computeStatus([local("notes/a.md", "b")], empty, remote()).conflicts, [
+    { path: "notes/a.md", id: "id", remoteName: "notes/a.md", kind: "untracked" },
+  ]);
 });
 
 Deno.test("classifies a checksum-preserving local rename without a delete", () => {
@@ -42,13 +51,17 @@ Deno.test("does not mistake a duplicate-content file for a deleted file rename",
 
 Deno.test("treats rename-delete races as conflicts", () => {
   const localRenameRemoteDelete = computeStatus([local("renamed.md", "a")], baseline(), { lastUpdatedAt: "", files: {} });
-  assertEquals(localRenameRemoteDelete.conflicts, ["renamed.md"]);
+  assertEquals(localRenameRemoteDelete.conflicts, [
+    { path: "renamed.md", id: "id", remoteName: null, kind: "localEditRemoteDelete" },
+  ]);
 
   const localDeleteRemoteRename = computeStatus([], baseline(), {
     lastUpdatedAt: "",
     files: { id: { name: "notes/renamed.md", md5Checksum: "a", mimeType: "text/markdown", modifiedTime: "" } },
   });
-  assertEquals(localDeleteRemoteRename.conflicts, ["notes/a.md"]);
+  assertEquals(localDeleteRemoteRename.conflicts, [
+    { path: "notes/a.md", id: "id", remoteName: "notes/renamed.md", kind: "localDeleteRemoteEdit" },
+  ]);
 });
 
 Deno.test("recognizes already-applied remote state after an interrupted pull", () => {
@@ -107,6 +120,38 @@ Deno.test("reconciles stale sync metadata against the live Drive listing", () =>
   assertEquals(Object.keys(reconciled.files).sort(), ["created", "kept"]);
   assertEquals(reconciled.files.kept.md5Checksum, "current");
   assertEquals(reconciled.files.kept.size, "12");
+});
+
+Deno.test("snapshot keeps pending local edits, deletes, and unresolved conflicts", () => {
+  const currentRemote: SyncMeta = {
+    lastUpdatedAt: "now",
+    files: {
+      synced: { name: "synced.md", md5Checksum: "s", mimeType: "text/markdown", modifiedTime: "" },
+      edited: { name: "edited.md", md5Checksum: "e", mimeType: "text/markdown", modifiedTime: "" },
+      deleted: { name: "deleted.md", md5Checksum: "d", mimeType: "text/markdown", modifiedTime: "" },
+      untracked: { name: "conflict.md", md5Checksum: "r", mimeType: "text/markdown", modifiedTime: "" },
+    },
+  };
+  const previous: LocalSyncMeta = {
+    projectId: "p", lastUpdatedAt: "",
+    files: {
+      synced: { name: "synced.md", md5Checksum: "s" },
+      edited: { name: "edited.md", md5Checksum: "e" },
+      deleted: { name: "deleted.md", md5Checksum: "d" },
+    },
+    pathToId: { "synced.md": "synced", "edited.md": "edited", "deleted.md": "deleted" },
+  };
+  const inventory = [local("synced.md", "s"), local("edited.md", "changed"), local("conflict.md", "mine")];
+
+  const snapshot = computeSnapshot("p", currentRemote, inventory, previous);
+  assertEquals(snapshot.files.synced, { name: "synced.md", md5Checksum: "s" });
+  // A pending local edit keeps its baseline entry so the change stays pushable.
+  assertEquals(snapshot.files.edited, { name: "edited.md", md5Checksum: "e" });
+  // A pending local delete stays tracked so the next push can apply it.
+  assertEquals(snapshot.files.deleted, { name: "deleted.md", md5Checksum: "d" });
+  // An unresolved untracked conflict must not be adopted as synchronized.
+  assertEquals(snapshot.files.untracked, undefined);
+  assertEquals(snapshot.pathToId["deleted.md"], "deleted");
 });
 
 Deno.test("pull worker pool limits concurrency", async () => {

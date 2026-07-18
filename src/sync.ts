@@ -1,6 +1,6 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
-import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, syncablePath, updateRemote, writeSyncMeta } from "./drive";
-import type { LocalSyncMeta, PluginAPI, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary } from "./types";
+import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
+import type { ConflictInfo, LocalSyncMeta, PluginAPI, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
@@ -70,6 +70,27 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
   if (failure !== undefined) throw failure;
 }
 
+/**
+ * Snapshot of the last known synchronized state. A remote entry is adopted only
+ * when the local file matches it; otherwise the previous baseline entry is kept
+ * so pending local edits, renames, deletes, and unresolved conflicts survive a
+ * pull or a partial conflict resolution.
+ */
+export function computeSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[], baseline: LocalSyncMeta): LocalSyncMeta {
+  const localByPath = new Map(inventory.map((file) => [file.path, file]));
+  const files: LocalSyncMeta["files"] = {}, pathToId: Record<string, string> = {};
+  for (const [id, file] of Object.entries(remote.files)) {
+    const local = localByPath.get(file.name);
+    const previous = baseline.files[id];
+    let entry: LocalSyncMeta["files"][string] | undefined;
+    if (local && (!file.md5Checksum || local.md5 === file.md5Checksum)) entry = { name: file.name, md5Checksum: file.md5Checksum || local.md5 };
+    else if (previous) entry = previous;
+    if (!entry) continue;
+    files[id] = entry; pathToId[entry.name] = id;
+  }
+  return { projectId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId };
+}
+
 export interface PushAction { local: ProjectFile; id: string | undefined; rename: boolean; upload: "create" | "update" | null }
 
 export function planPush(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
@@ -95,14 +116,15 @@ export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta,
   const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [file.name, { id, file }]));
   const localIds = resolveLocalIds(inventory, baseline);
   const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(path)!]));
-  const localChanges: string[] = [], remoteChanges: string[] = [], localOnly: string[] = [], remoteOnly: string[] = [], localDeletes: string[] = [], remoteDeletes: string[] = [], conflicts: string[] = [];
+  const localChanges: string[] = [], remoteChanges: string[] = [], localOnly: string[] = [], remoteOnly: string[] = [], localDeletes: string[] = [], remoteDeletes: string[] = [];
+  const conflicts: ConflictInfo[] = [];
 
   for (const local of inventory) {
     const id = localIds.get(local.path);
     if (!id) {
       const samePath = remoteByName.get(local.path);
       if (!samePath) localOnly.push(local.path);
-      else if (samePath.file.md5Checksum !== local.md5) conflicts.push(local.path);
+      else if (samePath.file.md5Checksum !== local.md5) conflicts.push({ path: local.path, id: samePath.id, remoteName: samePath.file.name, kind: "untracked" });
       continue;
     }
     const previous = baseline.files[id];
@@ -111,8 +133,8 @@ export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta,
     const localChanged = !previous || previous.md5Checksum !== local.md5 || previous.name !== local.path;
     const remoteChanged = !!previous && !!currentRemote && (previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name);
     if (!currentRemote) {
-      if (localChanged) conflicts.push(local.path); else remoteDeletes.push(previous.name);
-    } else if (localChanged && remoteChanged) conflicts.push(local.path);
+      if (localChanged) conflicts.push({ path: local.path, id, remoteName: null, kind: "localEditRemoteDelete" }); else remoteDeletes.push(previous.name);
+    } else if (localChanged && remoteChanged) conflicts.push({ path: local.path, id, remoteName: currentRemote.name, kind: "edit" });
     else if (localChanged) localChanges.push(local.path);
     else if (remoteChanged) remoteChanges.push(currentRemote.name);
   }
@@ -122,12 +144,12 @@ export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta,
     const currentRemote = remote.files[id];
     if (!currentRemote) continue;
     const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
-    if (remoteChanged) conflicts.push(previous.name); else localDeletes.push(previous.name);
+    if (remoteChanged) conflicts.push({ path: previous.name, id, remoteName: currentRemote.name, kind: "localDeleteRemoteEdit" }); else localDeletes.push(previous.name);
   }
   for (const [id, file] of Object.entries(remote.files)) {
     if (!baseline.files[id] && !localByPath.has(file.name)) remoteOnly.push(file.name);
   }
-  return { localChanges: sorted(localChanges), remoteChanges: sorted(remoteChanges), localOnly: sorted(localOnly), remoteOnly: sorted(remoteOnly), localDeletes: sorted(localDeletes), remoteDeletes: sorted(remoteDeletes), conflicts: sorted(conflicts) };
+  return { localChanges: sorted(localChanges), remoteChanges: sorted(remoteChanges), localOnly: sorted(localOnly), remoteOnly: sorted(remoteOnly), localDeletes: sorted(localDeletes), remoteDeletes: sorted(remoteDeletes), conflicts: conflicts.sort((a, b) => a.path.localeCompare(b.path)) };
 }
 
 export class ProjectDriveSync {
@@ -178,22 +200,14 @@ export class ProjectDriveSync {
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
 
-  private async saveSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[]): Promise<void> {
-    const localByPath = new Map(inventory.map((file) => [file.path, file]));
-    const files: LocalSyncMeta["files"] = {}, pathToId: Record<string, string> = {};
-    for (const [id, file] of Object.entries(remote.files)) {
-      const local = localByPath.get(file.name);
-      if (!local) continue;
-      files[id] = { name: file.name, md5Checksum: file.md5Checksum || local.md5 };
-      pathToId[file.name] = id;
-    }
-    await this.api.storage!.set(SNAPSHOT_KEY, { projectId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId } satisfies LocalSyncMeta);
+  private async saveSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[], baseline: LocalSyncMeta): Promise<void> {
+    await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(projectId, remote, inventory, baseline));
   }
 
   async push(allowDeletes = false): Promise<SyncSummary> {
     const connection = await this.assertProject();
     const { session, inventory, baseline, remote, status } = await this.state();
-    if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.join(", ")}`);
+    if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length) throw new Error("Google Drive has pending changes. Pull before pushing.");
     if (status.localDeletes.length && !allowDeletes) throw new Error(`Push will move ${status.localDeletes.length} remote file(s) to GemiHub trash. Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
@@ -222,15 +236,14 @@ export class ProjectDriveSync {
     }
     const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
     const writtenRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
-    await this.saveSnapshot(connection.project.id, writtenRemote, await this.inventory());
+    await this.saveSnapshot(connection.project.id, writtenRemote, await this.inventory(), baseline);
     return summary;
   }
 
   async pull(allowDeletes = false, onProgress?: (progress: SyncProgress) => void): Promise<SyncSummary> {
     const connection = await this.assertProject();
     const { session, inventory, baseline, remote, status } = await this.state();
-    if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.join(", ")}`);
-    if (status.localChanges.length || status.localDeletes.length) throw new Error("The project has pending tracked changes. Push before pulling.");
+    if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteDeletes.length && !allowDeletes) throw new Error(`Pull will delete ${status.remoteDeletes.length} local file(s). Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -240,6 +253,15 @@ export class ProjectDriveSync {
     await parallelForEach(files, async ([id, file]) => {
       try {
         const previous = baseline.files[id];
+        // A remote file unchanged since the baseline has nothing to pull;
+        // leave the local side alone so pending local edits, renames, and
+        // deletes survive until the next push.
+        if (previous && previous.md5Checksum === file.md5Checksum && previous.name === file.name) {
+          summary.skipped++;
+          completed++;
+          onProgress?.({ phase: "pull", completed, total: files.length, path: file.name });
+          return;
+        }
         let local = localByPath.get(file.name);
         if (previous && previous.name !== file.name && localByPath.has(previous.name) && !local) {
           await this.api.projectFiles!.rename(previous.name, file.name); summary.renamed++;
@@ -268,8 +290,80 @@ export class ProjectDriveSync {
       }
     }
     onProgress?.({ phase: "snapshot", completed: 0, total: 1 });
-    await this.saveSnapshot(connection.project.id, remote, await this.inventory());
+    await this.saveSnapshot(connection.project.id, remote, await this.inventory(), baseline);
     onProgress?.({ phase: "snapshot", completed: 1, total: 1 });
     return summary;
+  }
+
+  /**
+   * Resolve conflicts per file by choosing the surviving side, the same way the
+   * GemiHub Obsidian plugin does: the losing side is backed up to the Drive
+   * `sync_conflicts/` folder before it is overwritten or deleted.
+   */
+  async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote" }>): Promise<number> {
+    const connection = await this.assertProject();
+    const { session, inventory, baseline, remote, status } = await this.state();
+    const current = new Map(status.conflicts.map((conflict) => [conflict.path, conflict]));
+    const localByPath = new Map(inventory.map((file) => [file.path, file]));
+    let touchedRemote = false;
+    let resolved = 0;
+
+    const readLocal = async (path: string): Promise<string | ArrayBuffer> => {
+      const raw = await this.api.projectFiles!.read(path);
+      return localByPath.get(path)?.binary ? decodeDataURL(raw) : raw;
+    };
+    const writeLocal = async (path: string, value: string | ArrayBuffer): Promise<void> => {
+      if (localByPath.has(path)) await this.api.projectFiles!.update(path, value);
+      else await this.api.projectFiles!.create(path, value);
+    };
+
+    for (const { conflict: requested, choice } of resolutions) {
+      const conflict = current.get(requested.path);
+      if (!conflict || conflict.kind !== requested.kind) continue;
+      const remoteFile = remote.files[conflict.id];
+
+      if (conflict.kind === "localEditRemoteDelete") {
+        if (choice === "local") {
+          await createRemote(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
+          touchedRemote = true;
+        } else {
+          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
+          await this.api.projectFiles!.delete(conflict.path);
+        }
+      } else if (conflict.kind === "localDeleteRemoteEdit") {
+        if (!remoteFile) continue;
+        if (choice === "local") {
+          const trash = await ensureFolder(this.api, session.accessToken, session.rootFolderId, "trash");
+          await moveRemote(this.api, session.accessToken, conflict.id, session.rootFolderId, trash);
+          touchedRemote = true;
+        } else {
+          const content = await readRemote(this.api, session.accessToken, conflict.id);
+          await writeLocal(remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? content.buffer : content.text);
+        }
+      } else { // "edit" | "untracked": both sides exist
+        if (!remoteFile) continue;
+        if (choice === "local") {
+          const backup = await readRemote(this.api, session.accessToken, conflict.id);
+          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? backup.buffer : backup.text, remoteFile.mimeType);
+          if (remoteFile.name !== conflict.path) await renameRemote(this.api, session.accessToken, conflict.id, conflict.path);
+          await updateRemote(this.api, session.accessToken, conflict.id, await readLocal(conflict.path), mimeType(conflict.path));
+          touchedRemote = true;
+        } else {
+          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
+          const content = await readRemote(this.api, session.accessToken, conflict.id);
+          if (remoteFile.name !== conflict.path) await this.api.projectFiles!.delete(conflict.path);
+          await writeLocal(remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? content.buffer : content.text);
+        }
+      }
+      resolved++;
+    }
+
+    let finalRemote = remote;
+    if (touchedRemote) {
+      const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
+      finalRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
+    }
+    await this.saveSnapshot(connection.project.id, finalRemote, await this.inventory(), baseline);
+    return resolved;
   }
 }

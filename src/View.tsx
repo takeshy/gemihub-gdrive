@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ProjectDriveSync } from "./sync";
-import type { PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
+import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -21,15 +21,21 @@ function previewItems(status: SyncStatus, direction: PreviewDirection): PreviewI
   } else {
     add(status.remoteOnly, "new"); add(status.remoteChanges, "modified"); add(status.remoteDeletes, "deleted");
   }
-  add(status.conflicts, "conflict");
+  add(status.conflicts.map((conflict) => conflict.path), "conflict");
   return [...items].map(([path, type]) => ({ path, type })).sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function previewBlockReason(status: SyncStatus, direction: PreviewDirection): string | null {
-  if (status.conflicts.length) return "Resolve conflicts before syncing.";
+  if (status.conflicts.length) return "Resolve the conflicts above before syncing.";
   if (direction === "push" && (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length)) return "Drive has pending changes. Pull before pushing.";
-  if (direction === "pull" && (status.localChanges.length || status.localDeletes.length)) return "The project has pending tracked changes. Push before pulling.";
   return null;
+}
+
+function conflictLabel(kind: ConflictInfo["kind"]): string {
+  if (kind === "localEditRemoteDelete") return "edited here, deleted on Drive";
+  if (kind === "localDeleteRemoteEdit") return "deleted here, edited on Drive";
+  if (kind === "untracked") return "different content on both sides";
+  return "edited on both sides";
 }
 
 export function DriveSyncView({ api }: { api: PluginAPI }) {
@@ -89,6 +95,12 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     setStatus(await client.status()); setPreview(null);
   };
 
+  const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
+    const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })));
+    const next = await client.status(); setStatus(next);
+    setMessage(`Resolved ${resolved} conflict(s); the other side was backed up to sync_conflicts/ on Drive. ${countStatus(next)}`);
+  };
+
   return <section className="gdrive-sync">
     <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible project sync</small></div></header>
     {!connection ? <div className="gdrive-form">
@@ -109,7 +121,21 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
         <span>Pull deletes <b>{status.remoteDeletes.length}</b></span>
         <span className={status.conflicts.length ? "danger" : ""}>Conflicts <b>{status.conflicts.length}</b></span>
       </div>}
-      {status?.conflicts.length ? <details><summary>Conflicting paths</summary><ul>{status.conflicts.map((path) => <li key={path}>{path}</li>)}</ul></details> : null}
+      {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
+        <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
+        <p>Choose which side to keep for each file. The other side is backed up to <code>sync_conflicts/</code> on Drive.</p>
+        <ul>{status.conflicts.map((conflict) => <li key={conflict.path} className="is-conflict">
+          <div className="gdrive-conflict-file"><span>{conflict.path}</span><small>{conflictLabel(conflict.kind)}</small></div>
+          <div className="gdrive-conflict-buttons">
+            <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "local"))}>Keep local</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "remote"))}>Keep remote</button>
+          </div>
+        </li>)}</ul>
+        <div className="gdrive-preview-actions">
+          <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve(status.conflicts, "local"))}>Keep all local</button>
+          <button type="button" disabled={busy} onClick={() => void run(() => resolve(status.conflicts, "remote"))}>Keep all remote</button>
+        </div>
+      </div> : null}
       {status && preview ? <div className="gdrive-preview">
         <div className="gdrive-preview-header"><strong>{preview === "push" ? "Push to Drive" : "Pull to project"}</strong><span>{previewItems(status, preview).length} file(s)</span></div>
         {previewItems(status, preview).length ? <ul>{previewItems(status, preview).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files to sync.</p>}

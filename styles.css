@@ -28,3 +28,8 @@
 .gdrive-preview .danger { color: var(--danger); }
 .gdrive-preview-actions { justify-content: flex-end; }
 .gdrive-message { border-left: 3px solid var(--accent); padding-left: 8px; }
+.gdrive-conflicts li { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.gdrive-conflict-file { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.gdrive-conflict-file small { color: var(--danger); }
+.gdrive-conflict-buttons { display: flex; gap: 6px; }
+.gdrive-conflicts code { font-size: .75rem; }

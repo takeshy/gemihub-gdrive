@@ -39,6 +39,14 @@ export interface LocalSyncMeta {
   pathToId: Record<string, string>;
 }
 
+export type ConflictKind = "edit" | "untracked" | "localEditRemoteDelete" | "localDeleteRemoteEdit";
+export interface ConflictInfo {
+  path: string;
+  id: string;
+  remoteName: string | null;
+  kind: ConflictKind;
+}
+
 export interface SyncStatus {
   localChanges: string[];
   remoteChanges: string[];
@@ -46,7 +54,7 @@ export interface SyncStatus {
   remoteOnly: string[];
   localDeletes: string[];
   remoteDeletes: string[];
-  conflicts: string[];
+  conflicts: ConflictInfo[];
 }
 
 export interface SyncSummary { created: number; updated: number; renamed: number; deleted: number; skipped: number }

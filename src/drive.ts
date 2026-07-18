@@ -105,6 +105,20 @@ export async function ensureFolder(api: PluginAPI, accessToken: string, rootFold
   return created.id;
 }
 
+/** Same naming scheme as GemiHub's saveConflictBackup: path separators become
+ * underscores and a timestamp is inserted before the extension. */
+export function conflictBackupName(path: string, now = new Date()): string {
+  const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const safe = path.replace(/\//g, "_");
+  const dot = safe.lastIndexOf(".");
+  return dot > 0 ? `${safe.slice(0, dot)}_${timestamp}${safe.slice(dot)}` : `${safe}_${timestamp}`;
+}
+
+export async function saveConflictBackup(api: PluginAPI, accessToken: string, rootFolderId: string, path: string, content: string | ArrayBuffer, mimeType: string): Promise<void> {
+  const folder = await ensureFolder(api, accessToken, rootFolderId, "sync_conflicts");
+  await createRemote(api, accessToken, folder, conflictBackupName(path), content, typeof content === "string" ? "text/plain" : mimeType);
+}
+
 export async function moveRemote(api: PluginAPI, accessToken: string, id: string, from: string, to: string): Promise<void> {
   await driveRequest(api, `${API}/files/${encodeURIComponent(id)}?addParents=${encodeURIComponent(to)}&removeParents=${encodeURIComponent(from)}&fields=id`, accessToken, { method: "PATCH" });
 }
