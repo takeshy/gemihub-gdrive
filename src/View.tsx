@@ -10,6 +10,28 @@ function countStatus(value: SyncStatus): string {
   return `${value.localChanges.length + value.localOnly.length} local, ${value.remoteChanges.length + value.remoteOnly.length} remote, ${value.conflicts.length} conflicts`;
 }
 
+type PreviewDirection = "push" | "pull";
+type PreviewItem = { path: string; type: "new" | "modified" | "deleted" | "conflict" };
+
+function previewItems(status: SyncStatus, direction: PreviewDirection): PreviewItem[] {
+  const items = new Map<string, PreviewItem["type"]>();
+  const add = (paths: string[], type: PreviewItem["type"]) => paths.forEach((path) => items.set(path, type));
+  if (direction === "push") {
+    add(status.localOnly, "new"); add(status.localChanges, "modified"); add(status.localDeletes, "deleted");
+  } else {
+    add(status.remoteOnly, "new"); add(status.remoteChanges, "modified"); add(status.remoteDeletes, "deleted");
+  }
+  add(status.conflicts, "conflict");
+  return [...items].map(([path, type]) => ({ path, type })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function previewBlockReason(status: SyncStatus, direction: PreviewDirection): string | null {
+  if (status.conflicts.length) return "Resolve conflicts before syncing.";
+  if (direction === "push" && (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length)) return "Drive has pending changes. Pull before pushing.";
+  if (direction === "pull" && (status.localChanges.length || status.localDeletes.length)) return "The project has pending tracked changes. Push before pulling.";
+  return null;
+}
+
 export function DriveSyncView({ api }: { api: PluginAPI }) {
   const client = useMemo(() => new ProjectDriveSync(api), [api]);
   const [connection, setConnection] = useState<Awaited<ReturnType<ProjectDriveSync["connection"]>>>(null);
@@ -20,6 +42,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<SyncProgress | null>(null);
+  const [preview, setPreview] = useState<PreviewDirection | null>(null);
 
   useEffect(() => { void client.connection().then(setConnection).catch((error) => setMessage(String(error))); }, [client]);
 
@@ -31,7 +54,12 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
 
   const refresh = async () => {
     const next = await client.status();
-    setStatus(next); setMessage(countStatus(next));
+    setStatus(next); setPreview(null); setMessage(countStatus(next));
+  };
+
+  const prepare = async (direction: PreviewDirection) => {
+    const next = await client.status();
+    setStatus(next); setPreview(direction); setMessage(countStatus(next));
   };
 
   const push = async () => {
@@ -39,7 +67,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const deletions = next.localDeletes.length;
     if (deletions && !window.confirm(`Push will move ${deletions} file(s) to GemiHub trash. Continue?`)) return;
     setMessage(`Push complete: ${summary(await client.push(deletions > 0))}`);
-    setStatus(await client.status());
+    setStatus(await client.status()); setPreview(null);
   };
 
   const pull = async () => {
@@ -47,7 +75,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const deletions = next.remoteDeletes.length;
     if (deletions && !window.confirm(`Pull will delete ${deletions} local project file(s). Continue?`)) return;
     setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
-    setStatus(await client.status());
+    setStatus(await client.status()); setPreview(null);
   };
 
   return <section className="gdrive-sync">
@@ -71,10 +99,19 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
         <span className={status.conflicts.length ? "danger" : ""}>Conflicts <b>{status.conflicts.length}</b></span>
       </div>}
       {status?.conflicts.length ? <details><summary>Conflicting paths</summary><ul>{status.conflicts.map((path) => <li key={path}>{path}</li>)}</ul></details> : null}
+      {status && preview ? <div className="gdrive-preview">
+        <div className="gdrive-preview-header"><strong>{preview === "push" ? "Push to Drive" : "Pull to project"}</strong><span>{previewItems(status, preview).length} file(s)</span></div>
+        {previewItems(status, preview).length ? <ul>{previewItems(status, preview).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files to sync.</p>}
+        {previewBlockReason(status, preview) ? <p className="danger">{previewBlockReason(status, preview)}</p> : null}
+        <div className="gdrive-preview-actions">
+          <button type="button" className="secondary" disabled={busy} onClick={() => setPreview(null)}>Cancel</button>
+          <button type="button" disabled={busy || !!previewBlockReason(status, preview)} onClick={() => void run(preview === "push" ? push : pull)}>{preview === "push" ? "Push" : "Pull"}</button>
+        </div>
+      </div> : null}
       <div className="gdrive-buttons">
         <button type="button" disabled={busy} onClick={() => void run(refresh)}>Check</button>
-        <button type="button" disabled={busy} onClick={() => void run(pull)}>Pull</button>
-        <button type="button" disabled={busy} onClick={() => void run(push)}>Push</button>
+        <button type="button" disabled={busy} onClick={() => void run(() => prepare("pull"))}>Pull</button>
+        <button type="button" disabled={busy} onClick={() => void run(() => prepare("push"))}>Push</button>
       </div>
       <small>GemiHubと同じ `_sync-meta.json` を使用します。初回に両側へ異なるファイルがある場合は Pull → Push の順で統合してください。</small>
     </div>}

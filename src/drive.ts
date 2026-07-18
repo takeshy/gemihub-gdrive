@@ -54,9 +54,13 @@ export async function listRootFiles(api: PluginAPI, accessToken: string, rootFol
 }
 
 export async function findByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile | null> {
+  return (await findAllByName(api, accessToken, rootFolderId, name))[0] ?? null;
+}
+
+async function findAllByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile[]> {
   const query = encodeURIComponent(`name='${escapeQuery(name)}' and '${escapeQuery(rootFolderId)}' in parents and trashed=false`);
-  const body = (await driveRequest(api, `${API}/files?q=${query}&fields=files(id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents)&pageSize=1`, accessToken)).json as { files?: DriveFile[] };
-  return body.files?.[0] ?? null;
+  const body = (await driveRequest(api, `${API}/files?q=${query}&orderBy=modifiedTime%20desc&fields=files(id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents)&pageSize=1000`, accessToken)).json as { files?: DriveFile[] };
+  return body.files ?? [];
 }
 
 export async function readRemote(api: PluginAPI, accessToken: string, id: string): Promise<{ text: string; buffer: ArrayBuffer }> {
@@ -114,29 +118,67 @@ export function metaFromFiles(files: DriveFile[]): SyncMeta {
   };
 }
 
-export async function readSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string): Promise<SyncMeta> {
-  const file = await findByName(api, accessToken, rootFolderId, "_sync-meta.json");
-  if (file) {
-    try {
-      const parsed = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
-      parsed.files = Object.fromEntries(Object.entries(parsed.files ?? {}).filter(([, item]) => syncableDriveFile(item)));
-      return parsed;
-    } catch { /* rebuild below */ }
+/**
+ * Treat the Drive folder listing as authoritative while retaining metadata
+ * fields that are not returned by the listing request. GemiHub may briefly
+ * have duplicate or stale _sync-meta.json files after concurrent operations;
+ * relying on one of those files alone hides newly-created and deleted files.
+ */
+export function reconcileSyncMeta(meta: SyncMeta | null, files: DriveFile[]): SyncMeta {
+  const live = metaFromFiles(files);
+  if (!meta) return live;
+  live.lastUpdatedAt = meta.lastUpdatedAt || live.lastUpdatedAt;
+  for (const [id, file] of Object.entries(live.files)) {
+    const previous = meta.files?.[id];
+    if (previous) live.files[id] = {
+      ...previous,
+      ...file,
+      createdTime: file.createdTime ?? previous.createdTime,
+      size: file.size ?? previous.size,
+    };
   }
-  return metaFromFiles(await listRootFiles(api, accessToken, rootFolderId));
+  return live;
 }
 
-export async function writeSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string, meta: SyncMeta): Promise<void> {
+function syncMetaSignature(value: SyncMeta): string {
+  return JSON.stringify(Object.entries(value.files)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, file]) => [id, file.name, file.mimeType, file.md5Checksum, file.modifiedTime, file.size]));
+}
+
+export async function readSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string): Promise<SyncMeta> {
   const file = await findByName(api, accessToken, rootFolderId, "_sync-meta.json");
-  let files = meta.files;
+  let parsed: SyncMeta | null = null;
   if (file) {
     try {
-      const current = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
-      const nativeFiles = Object.fromEntries(Object.entries(current.files ?? {}).filter(([, item]) => isGoogleWorkspaceFile(item)));
-      files = { ...nativeFiles, ...files };
-    } catch { /* replace malformed metadata with the valid snapshot */ }
+      parsed = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
+      parsed.files = Object.fromEntries(Object.entries(parsed.files ?? {}).filter(([, item]) => syncableDriveFile(item)));
+    } catch { /* reconcile the live Drive listing without malformed metadata */ }
   }
-  const content = JSON.stringify({ ...meta, files }, null, 2);
-  if (file) await updateRemote(api, accessToken, file.id, content, "application/json");
-  else await createRemote(api, accessToken, rootFolderId, "_sync-meta.json", content, "application/json");
+  return reconcileSyncMeta(parsed, await listRootFiles(api, accessToken, rootFolderId));
+}
+
+export async function writeSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string, meta: SyncMeta): Promise<SyncMeta> {
+  let expected = meta;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const liveFiles = await listRootFiles(api, accessToken, rootFolderId);
+    expected = reconcileSyncMeta(expected, liveFiles);
+    expected.lastUpdatedAt = new Date().toISOString();
+    const matches = await findAllByName(api, accessToken, rootFolderId, "_sync-meta.json");
+    const nativeFiles: SyncMeta["files"] = {};
+    for (const match of matches) {
+      try {
+        const current = JSON.parse((await readRemote(api, accessToken, match.id)).text) as SyncMeta;
+        Object.assign(nativeFiles, Object.fromEntries(Object.entries(current.files ?? {}).filter(([, item]) => isGoogleWorkspaceFile(item))));
+      } catch { /* overwrite malformed or unreadable duplicate metadata */ }
+    }
+    const content = JSON.stringify({ ...expected, files: { ...nativeFiles, ...expected.files } }, null, 2);
+    if (matches.length) await Promise.all(matches.map((match) => updateRemote(api, accessToken, match.id, content, "application/json")));
+    else await createRemote(api, accessToken, rootFolderId, "_sync-meta.json", content, "application/json");
+
+    const after = metaFromFiles(await listRootFiles(api, accessToken, rootFolderId));
+    if (syncMetaSignature(after) === syncMetaSignature(expected)) return expected;
+    expected = after;
+  }
+  throw new Error("Google Drive changed while writing sync metadata. Check changes and retry.");
 }

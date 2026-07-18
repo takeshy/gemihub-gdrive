@@ -23,6 +23,38 @@ function remoteIsBinary(mime: string): boolean { return !mime.startsWith("text/"
 function emptySnapshot(projectId: string): LocalSyncMeta { return { projectId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
 
+function resolveLocalIds(inventory: ProjectFile[], baseline: LocalSyncMeta): Map<string, string> {
+  const resolved = new Map<string, string>();
+  const claimedIds = new Set<string>();
+
+  // Exact paths are unambiguous, even when several files have the same checksum.
+  for (const local of inventory) {
+    const id = baseline.pathToId[local.path];
+    if (id && baseline.files[id]) { resolved.set(local.path, id); claimedIds.add(id); }
+  }
+
+  // A checksum-preserving rename is safe only when the remaining old and new
+  // paths form a one-to-one match. This avoids guessing between empty or
+  // duplicate-content files.
+  const oldByChecksum = new Map<string, string[]>();
+  for (const [id, previous] of Object.entries(baseline.files)) {
+    if (claimedIds.has(id) || inventory.some((file) => file.path === previous.name)) continue;
+    const ids = oldByChecksum.get(previous.md5Checksum) ?? [];
+    ids.push(id); oldByChecksum.set(previous.md5Checksum, ids);
+  }
+  const localByChecksum = new Map<string, ProjectFile[]>();
+  for (const local of inventory) {
+    if (resolved.has(local.path)) continue;
+    const files = localByChecksum.get(local.md5) ?? [];
+    files.push(local); localByChecksum.set(local.md5, files);
+  }
+  for (const [checksum, ids] of oldByChecksum) {
+    const locals = localByChecksum.get(checksum) ?? [];
+    if (ids.length === 1 && locals.length === 1) resolved.set(locals[0].path, ids[0]);
+  }
+  return resolved;
+}
+
 export async function parallelForEach<T>(items: T[], worker: (item: T) => Promise<void>, concurrency = 5): Promise<void> {
   let next = 0;
   let failure: unknown;
@@ -41,35 +73,36 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
 export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
   const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [file.name, { id, file }]));
+  const localIds = resolveLocalIds(inventory, baseline);
+  const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(path)!]));
   const localChanges: string[] = [], remoteChanges: string[] = [], localOnly: string[] = [], remoteOnly: string[] = [], localDeletes: string[] = [], remoteDeletes: string[] = [], conflicts: string[] = [];
 
   for (const local of inventory) {
-    const id = baseline.pathToId[local.path];
+    const id = localIds.get(local.path);
     if (!id) {
       const samePath = remoteByName.get(local.path);
-      const rename = Object.entries(baseline.files).find(([candidateId, previous]) => previous.md5Checksum === local.md5 && !localByPath.has(previous.name) && remote.files[candidateId]);
-      if (rename) localChanges.push(local.path);
-      else if (!samePath) localOnly.push(local.path);
+      if (!samePath) localOnly.push(local.path);
       else if (samePath.file.md5Checksum !== local.md5) conflicts.push(local.path);
       continue;
     }
     const previous = baseline.files[id];
     const currentRemote = remote.files[id];
+    if (currentRemote && currentRemote.md5Checksum === local.md5 && currentRemote.name === local.path) continue;
     const localChanged = !previous || previous.md5Checksum !== local.md5 || previous.name !== local.path;
-    const remoteChanged = !!previous && !!currentRemote && (previous.md5Checksum !== currentRemote.md5Checksum || previous.name.toLowerCase() !== currentRemote.name.toLowerCase());
-    if (localChanged && remoteChanged) conflicts.push(local.path);
+    const remoteChanged = !!previous && !!currentRemote && (previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name);
+    if (!currentRemote) {
+      if (localChanged) conflicts.push(local.path); else remoteDeletes.push(previous.name);
+    } else if (localChanged && remoteChanged) conflicts.push(local.path);
     else if (localChanged) localChanges.push(local.path);
     else if (remoteChanged) remoteChanges.push(currentRemote.name);
   }
 
   for (const [id, previous] of Object.entries(baseline.files)) {
-    const hasLocal = localByPath.has(previous.name) || inventory.some((file) => baseline.pathToId[file.path] === id || (!baseline.pathToId[file.path] && file.md5 === previous.md5Checksum));
-    const hasRemote = !!remote.files[id];
-    if (!hasLocal && hasRemote) localDeletes.push(previous.name);
-    if (hasLocal && !hasRemote) {
-      const local = localByPath.get(previous.name);
-      if (local && local.md5 !== previous.md5Checksum) conflicts.push(previous.name); else remoteDeletes.push(previous.name);
-    }
+    if (localById.has(id)) continue;
+    const currentRemote = remote.files[id];
+    if (!currentRemote) continue;
+    const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
+    if (remoteChanged) conflicts.push(previous.name); else localDeletes.push(previous.name);
   }
   for (const [id, file] of Object.entries(remote.files)) {
     if (!baseline.files[id] && !localByPath.has(file.name)) remoteOnly.push(file.name);
@@ -145,19 +178,21 @@ export class ProjectDriveSync {
     if (status.localDeletes.length && !allowDeletes) throw new Error(`Push will move ${status.localDeletes.length} remote file(s) to GemiHub trash. Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const renamedIds = new Set<string>();
-    const localPaths = new Set(inventory.map((file) => file.path));
-    const missing = Object.entries(baseline.files).filter(([, file]) => !localPaths.has(file.name));
+    const localIds = resolveLocalIds(inventory, baseline);
     for (const local of inventory) {
-      let id = baseline.pathToId[local.path];
+      let id = localIds.get(local.path);
       if (!id) {
-        const sameRemote = Object.entries(remote.files).find(([, file]) => file.name === local.path && file.md5Checksum === local.md5);
-        if (sameRemote) id = sameRemote[0];
+        const sameRemote = Object.entries(remote.files).filter(([, file]) => file.name === local.path && file.md5Checksum === local.md5);
+        if (sameRemote.length === 1) id = sameRemote[0][0];
       }
-      if (!id) {
-        const renamed = missing.find(([candidateId, previous]) => previous.md5Checksum === local.md5 && remote.files[candidateId]);
-        if (renamed) { id = renamed[0]; await renameRemote(this.api, session.accessToken, id, local.path); renamedIds.add(id); summary.renamed++; }
+      if (id && remote.files[id] && baseline.files[id]?.name !== local.path) {
+        await renameRemote(this.api, session.accessToken, id, local.path);
+        renamedIds.add(id); summary.renamed++;
       }
-      if (id && baseline.files[id]?.md5Checksum === local.md5 && baseline.files[id]?.name === local.path) { summary.skipped++; continue; }
+      if (id && baseline.files[id]?.md5Checksum === local.md5) {
+        if (!renamedIds.has(id)) summary.skipped++;
+        continue;
+      }
       const raw = await this.api.projectFiles!.read(local.path);
       const content = local.binary ? decodeDataURL(raw) : raw;
       if (id && remote.files[id]) { await updateRemote(this.api, session.accessToken, id, content, mimeType(local.path)); summary.updated++; }
@@ -171,8 +206,8 @@ export class ProjectDriveSync {
       }
     }
     const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
-    await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
-    await this.saveSnapshot(connection.project.id, nextRemote, await this.inventory());
+    const writtenRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
+    await this.saveSnapshot(connection.project.id, writtenRemote, await this.inventory());
     return summary;
   }
 
