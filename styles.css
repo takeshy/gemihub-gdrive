@@ -18,7 +18,7 @@
 .gdrive-preview { display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
 .gdrive-preview-header, .gdrive-preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .gdrive-preview-header span { color: var(--muted); }
-.gdrive-preview ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; border-block: 1px solid var(--border); }
+.gdrive-preview ul { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; border-block: 1px solid var(--border); }
 .gdrive-preview li { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .gdrive-preview li:last-child { border-bottom: 0; }
 .gdrive-preview-type { font-size: .7rem; text-transform: uppercase; color: var(--muted); }
@@ -33,3 +33,22 @@
 .gdrive-conflict-file small { color: var(--danger); }
 .gdrive-conflict-buttons { display: flex; gap: 6px; }
 .gdrive-conflicts code { font-size: .75rem; }
+.gdrive-conflict-detail { grid-column: 1 / -1; min-width: 0; }
+.gdrive-conflict-comparison { display: grid; gap: 6px; padding: 7px 0 2px; }
+.gdrive-diff-heading { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; color: var(--muted); font-size: .72rem; }
+.gdrive-diff-heading span { overflow-wrap: anywhere; }
+.gdrive-diff { max-height: 300px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .72rem; }
+.gdrive-diff-line { display: grid; grid-template-columns: 34px 34px 18px minmax(max-content, 1fr); min-width: max-content; }
+.gdrive-diff-line > span, .gdrive-diff-line > code { padding: 2px 5px; white-space: pre; color: inherit; }
+.gdrive-diff-number { text-align: right; color: var(--muted) !important; border-right: 1px solid var(--border); user-select: none; }
+.gdrive-diff-mark { user-select: none; }
+.gdrive-diff-line.is-added { background: color-mix(in srgb, var(--success, #2e8b57) 24%, var(--panel)); color: var(--text); }
+.gdrive-diff-line.is-removed { background: color-mix(in srgb, var(--danger, #c33) 22%, var(--panel)); color: var(--text); }
+.gdrive-diff-gap { padding: 4px 12px; color: var(--muted); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.gdrive-binary-comparison { display: grid; grid-template-columns: 48px minmax(100px, 1fr) auto minmax(120px, 1fr); gap: 6px 10px; align-items: baseline; overflow-x: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+.gdrive-binary-comparison code { color: var(--text); white-space: nowrap; }
+@media (max-width: 620px) {
+  .gdrive-conflicts li { grid-template-columns: 1fr; }
+  .gdrive-conflict-buttons { flex-wrap: wrap; }
+  .gdrive-conflict-detail { grid-column: 1; }
+}

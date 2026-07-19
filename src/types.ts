@@ -3,19 +3,23 @@ export interface ProjectFile { path: string; size: number; createdTime: number; 
 export interface HTTPRequest { url: string; method?: string; headers?: Record<string, string>; body?: string; bodyBase64?: string }
 export interface HTTPResponse { status: number; headers: Record<string, string>; body: string; bodyBase64: string }
 
+export interface WorkspaceFilesAPI {
+  current(): Promise<Project | null>;
+  inventory(): Promise<ProjectFile[]>;
+  read(path: string): Promise<string>;
+  create(path: string, content: string | ArrayBuffer): Promise<void>;
+  update(path: string, content: string | ArrayBuffer): Promise<void>;
+  createDirectory(path: string): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
+  delete(path: string): Promise<void>;
+}
+
 export interface PluginAPI {
   language: string;
   registerView(view: { id: string; name: string; icon?: string; location: "sidebar" | "main"; component: (props: { api: PluginAPI }) => unknown }): void;
-  projectFiles?: {
-    current(): Promise<Project | null>;
-    inventory(): Promise<ProjectFile[]>;
-    read(path: string): Promise<string>;
-    create(path: string, content: string | ArrayBuffer): Promise<void>;
-    update(path: string, content: string | ArrayBuffer): Promise<void>;
-    createDirectory(path: string): Promise<void>;
-    rename(oldPath: string, newPath: string): Promise<void>;
-    delete(path: string): Promise<void>;
-  };
+  files?: WorkspaceFilesAPI;
+  /** Compatibility fallback when Desktop exposes its Workspace as a project. */
+  projectFiles?: WorkspaceFilesAPI;
   storage?: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; getAll(): Promise<Record<string, unknown>> };
   network?: { request(request: HTTPRequest): Promise<HTTPResponse> };
 }

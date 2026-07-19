@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ProjectDriveSync } from "./sync";
+import { lineDiff } from "./diff";
+import { ProjectDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 function summary(value: SyncSummary): string {
@@ -38,6 +39,38 @@ function conflictLabel(kind: ConflictInfo["kind"]): string {
   return "edited on both sides";
 }
 
+function formatSize(value?: number): string {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = value / 1024, unit = units[0];
+  for (let index = 1; index < units.length && size >= 1024; index++) { size /= 1024; unit = units[index]; }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${unit}`;
+}
+
+function ConflictComparison({ value }: { value: ConflictPreview }) {
+  if (value.binary) return <div className="gdrive-conflict-comparison">
+    <p>Binary files cannot be displayed as text. Compare their file information below.</p>
+    <div className="gdrive-binary-comparison">
+      <strong>Local</strong><span>{value.local.exists ? value.local.name : "Deleted"}</span><span>{formatSize(value.local.size)}</span><code>{value.local.md5 || "—"}</code>
+      <strong>Drive</strong><span>{value.remote.exists ? value.remote.name : "Deleted"}</span><span>{formatSize(value.remote.size)}</span><code>{value.remote.md5 || "—"}</code>
+    </div>
+  </div>;
+
+  const lines = lineDiff(value.local.text ?? "", value.remote.text ?? "");
+  return <div className="gdrive-conflict-comparison">
+    <div className="gdrive-diff-heading"><span>Local: {value.local.exists ? value.local.name : "Deleted"}</span><span>Drive: {value.remote.exists ? value.remote.name : "Deleted"}</span></div>
+    <div className="gdrive-diff" role="table" aria-label="Local to Drive differences">
+      {lines.map((line, index) => line.kind === "gap"
+        ? <div className="gdrive-diff-gap" key={`gap:${index}`}>⋯ {line.text} ⋯</div>
+        : <div className={`gdrive-diff-line is-${line.kind}`} key={`${line.kind}:${index}`}>
+          <span className="gdrive-diff-number">{line.oldLine ?? ""}</span><span className="gdrive-diff-number">{line.newLine ?? ""}</span>
+          <span className="gdrive-diff-mark">{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</span><code>{line.text || " "}</code>
+        </div>)}
+    </div>
+  </div>;
+}
+
 export function DriveSyncView({ api }: { api: PluginAPI }) {
   const client = useMemo(() => {
     try { return new ProjectDriveSync(api); }
@@ -52,6 +85,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [preview, setPreview] = useState<PreviewDirection | null>(null);
+  const [conflictPreviews, setConflictPreviews] = useState<Record<string, { open: boolean; loading?: boolean; value?: ConflictPreview; error?: string }>>({});
 
   useEffect(() => {
     if (typeof client === "string") return;
@@ -59,7 +93,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   }, [client]);
 
   if (typeof client === "string") return <section className="gdrive-sync">
-    <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible project sync</small></div></header>
+    <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible Workspace sync</small></div></header>
     <p className="gdrive-message danger">{client}</p>
   </section>;
 
@@ -98,22 +132,37 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
     const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })));
     const next = await client.status(); setStatus(next);
+    setConflictPreviews({});
     setMessage(`Resolved ${resolved} conflict(s); the other side was backed up to sync_conflicts/ on Drive. ${countStatus(next)}`);
   };
 
+  const toggleConflictPreview = async (conflict: ConflictInfo) => {
+    const key = `${conflict.kind}:${conflict.path}`;
+    const current = conflictPreviews[key];
+    if (current?.open) { setConflictPreviews((values) => ({ ...values, [key]: { ...current, open: false } })); return; }
+    if (current?.value) { setConflictPreviews((values) => ({ ...values, [key]: { ...current, open: true } })); return; }
+    setConflictPreviews((values) => ({ ...values, [key]: { open: true, loading: true } }));
+    try {
+      const value = await client.conflictPreview(conflict);
+      setConflictPreviews((values) => ({ ...values, [key]: { open: true, value } }));
+    } catch (error) {
+      setConflictPreviews((values) => ({ ...values, [key]: { open: true, error: error instanceof Error ? error.message : String(error) } }));
+    }
+  };
+
   return <section className="gdrive-sync">
-    <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible project sync</small></div></header>
+    <header><span className="gdrive-logo">G</span><div><strong>Google Drive Sync</strong><small>GemiHub-compatible Workspace sync</small></div></header>
     {!connection ? <div className="gdrive-form">
-      <p>GemiHubで暗号化を有効にし、設定 → 同期 → 外部同期から同期トークンを生成してください。現在選択中のproject全体がこの接続に固定されます。</p>
+      <p>GemiHubで暗号化を有効にし、設定 → 同期 → 外部同期から同期トークンを生成してください。現在選択中のWorkspace全体がこの接続に固定されます。</p>
       <label><span>GemiHub sync token</span><textarea rows={5} value={token} onChange={(event) => setToken(event.target.value)} disabled={busy} /></label>
-      <button type="button" disabled={busy || !token.trim()} onClick={() => void run(async () => { const saved = await client.setup(token); setConnection(saved); setToken(""); setMessage(`Connected to project “${saved.project.name}”.`); })}>Connect project</button>
+      <button type="button" disabled={busy || !token.trim()} onClick={() => void run(async () => { const saved = await client.setup(token); setConnection(saved); setToken(""); setMessage(`Connected to Workspace “${saved.project.name}”.`); })}>Connect Workspace</button>
     </div> : !unlocked ? <div className="gdrive-form">
-      <p>接続先project: <strong>{connection.project.name}</strong></p>
+      <p>接続先Workspace: <strong>{connection.project.name}</strong></p>
       <label><span>GemiHub encryption password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} /></label>
       <button type="button" disabled={busy || !password} onClick={() => void run(async () => { await client.unlock(password); setPassword(""); setUnlocked(true); setMessage("Drive connection unlocked for this session."); })}>Unlock</button>
       <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => { await client.reset(); setConnection(null); setStatus(null); setMessage("Connection reset."); })}>Reset connection</button>
     </div> : <div className="gdrive-actions">
-      <div className="gdrive-project"><span>Project</span><strong>{connection.project.name}</strong><small>{connection.project.path}</small></div>
+      <div className="gdrive-project"><span>Workspace</span><strong>{connection.project.name}</strong><small>{connection.project.path}</small></div>
       {status && <div className="gdrive-status-grid">
         <span>Local changes <b>{status.localChanges.length + status.localOnly.length}</b></span>
         <span>Remote changes <b>{status.remoteChanges.length + status.remoteOnly.length}</b></span>
@@ -124,20 +173,28 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
         <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
         <p>Choose which side to keep for each file. The other side is backed up to <code>sync_conflicts/</code> on Drive.</p>
-        <ul>{status.conflicts.map((conflict) => <li key={conflict.path} className="is-conflict">
-          <div className="gdrive-conflict-file"><span>{conflict.path}</span><small>{conflictLabel(conflict.kind)}</small></div>
-          <div className="gdrive-conflict-buttons">
-            <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "local"))}>Keep local</button>
-            <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "remote"))}>Keep remote</button>
-          </div>
-        </li>)}</ul>
+        <ul>{status.conflicts.map((conflict) => {
+          const key = `${conflict.kind}:${conflict.path}`;
+          const comparison = conflictPreviews[key];
+          return <li key={key} className="is-conflict">
+            <div className="gdrive-conflict-file"><span>{conflict.path}</span><small>{conflictLabel(conflict.kind)}</small></div>
+            <div className="gdrive-conflict-buttons">
+              <button type="button" className="secondary" disabled={busy || comparison?.loading} onClick={() => void toggleConflictPreview(conflict)}>{comparison?.open ? "Hide diff" : comparison?.value ? "Show diff" : "View diff"}</button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "local"))}>Keep local</button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve([conflict], "remote"))}>Keep remote</button>
+            </div>
+            {comparison?.open ? <div className="gdrive-conflict-detail">
+              {comparison.loading ? <p>Loading both sides…</p> : comparison.error ? <p className="danger">{comparison.error}</p> : comparison.value ? <ConflictComparison value={comparison.value} /> : null}
+            </div> : null}
+          </li>;
+        })}</ul>
         <div className="gdrive-preview-actions">
           <button type="button" className="secondary" disabled={busy} onClick={() => void run(() => resolve(status.conflicts, "local"))}>Keep all local</button>
           <button type="button" disabled={busy} onClick={() => void run(() => resolve(status.conflicts, "remote"))}>Keep all remote</button>
         </div>
       </div> : null}
       {status && preview ? <div className="gdrive-preview">
-        <div className="gdrive-preview-header"><strong>{preview === "push" ? "Push to Drive" : "Pull to project"}</strong><span>{previewItems(status, preview).length} file(s)</span></div>
+        <div className="gdrive-preview-header"><strong>{preview === "push" ? "Push to Drive" : "Pull to Workspace"}</strong><span>{previewItems(status, preview).length} file(s)</span></div>
         {previewItems(status, preview).length ? <ul>{previewItems(status, preview).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files to sync.</p>}
         {previewBlockReason(status, preview) ? <p className="danger">{previewBlockReason(status, preview)}</p> : null}
         <div className="gdrive-preview-actions">

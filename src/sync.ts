@@ -1,6 +1,6 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
 import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
-import type { ConflictInfo, LocalSyncMeta, PluginAPI, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary } from "./types";
+import type { ConflictInfo, LocalSyncMeta, PluginAPI, Project, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
@@ -93,6 +93,12 @@ export function computeSnapshot(projectId: string, remote: SyncMeta, inventory: 
 
 export interface PushAction { local: ProjectFile; id: string | undefined; rename: boolean; upload: "create" | "update" | null }
 
+export interface ConflictPreview {
+  binary: boolean;
+  local: { exists: boolean; name: string; size?: number; md5?: string; text?: string };
+  remote: { exists: boolean; name: string; size?: number; md5?: string; text?: string };
+}
+
 export function planPush(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
   const localIds = resolveLocalIds(inventory, baseline);
   return inventory.map((local) => {
@@ -154,20 +160,37 @@ export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta,
 
 export class ProjectDriveSync {
   private session: Session | null = null;
+  private selectedFiles: WorkspaceFilesAPI | null = null;
   constructor(private api: PluginAPI) {
-    if (!api.projectFiles || !api.storage || !api.network) throw new Error("This plugin requires projectFiles, storage, and network APIs from GemiHub Desktop.");
+    if ((!api.files && !api.projectFiles) || !api.storage || !api.network) throw new Error("This plugin requires Workspace files, storage, and network APIs from GemiHub Desktop.");
+  }
+
+  private async workspaceFiles(expected?: Project): Promise<WorkspaceFilesAPI> {
+    if (this.selectedFiles) return this.selectedFiles;
+    const available: Array<{ files: WorkspaceFilesAPI; current: Project }> = [];
+    for (const files of [this.api.files, this.api.projectFiles]) {
+      if (!files || typeof files.current !== "function" || typeof files.inventory !== "function") continue;
+      const current = await files.current();
+      if (current) available.push({ files, current });
+    }
+    const selected = expected
+      ? available.find(({ current }) => current.id === expected.id && current.path === expected.path)
+      : available[0];
+    if (!selected) throw new Error("Select a Workspace before connecting Google Drive.");
+    this.selectedFiles = selected.files;
+    return selected.files;
   }
 
   async connection(): Promise<StoredConnection | null> { return await this.api.storage!.get(CONNECTION_KEY) as StoredConnection | null; }
   async setup(token: string): Promise<StoredConnection> {
-    const project = await this.api.projectFiles!.current();
-    if (!project) throw new Error("Select a project before connecting Google Drive.");
+    const project = await (await this.workspaceFiles()).current();
+    if (!project) throw new Error("Select a Workspace before connecting Google Drive.");
     const connection = await createConnection(this.api, token, project);
     await this.api.storage!.set(CONNECTION_KEY, connection);
     await this.api.storage!.set(SNAPSHOT_KEY, null);
     return connection;
   }
-  async reset(): Promise<void> { this.session = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
+  async reset(): Promise<void> { this.session = null; this.selectedFiles = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
   async unlock(password: string): Promise<void> {
     const connection = await this.connection();
     if (!connection) throw new Error("Google Drive is not connected.");
@@ -177,8 +200,20 @@ export class ProjectDriveSync {
   private async assertProject(connection?: StoredConnection): Promise<StoredConnection> {
     const saved = connection ?? await this.connection();
     if (!saved) throw new Error("Google Drive is not connected.");
-    const current = await this.api.projectFiles!.current();
-    if (!current || current.id !== saved.project.id || current.path !== saved.project.path) throw new Error(`This connection belongs to project “${saved.project.name}”. Switch back to that project before syncing.`);
+    const current = await (await this.workspaceFiles(saved.project)).current();
+    if (!current) throw new Error("Select a Workspace before syncing.");
+    if (current.id !== saved.project.id || current.path !== saved.project.path) {
+      // Desktop formerly exposed its compatibility project (id "project",
+      // name "Workspace") to this plugin. Migrate only that known legacy
+      // shape; real named project connections still require an explicit reset.
+      if (saved.project.id === "project" && saved.project.name === "Workspace") {
+        const migrated = { ...saved, project: current };
+        await this.api.storage!.set(CONNECTION_KEY, migrated);
+        await this.api.storage!.set(SNAPSHOT_KEY, null);
+        return migrated;
+      }
+      throw new Error(`This connection belongs to Workspace “${saved.project.name}”. Switch back to that Workspace before syncing, or reset the connection.`);
+    }
     return saved;
   }
   private async tokens(): Promise<Session> {
@@ -191,7 +226,7 @@ export class ProjectDriveSync {
     const value = await this.api.storage!.get(SNAPSHOT_KEY) as LocalSyncMeta | null;
     return value?.projectId === projectId ? value : emptySnapshot(projectId);
   }
-  private async inventory(): Promise<ProjectFile[]> { return (await this.api.projectFiles!.inventory()).filter((file) => syncablePath(file.path)); }
+  private async inventory(): Promise<ProjectFile[]> { return (await (await this.workspaceFiles()).inventory()).filter((file) => syncablePath(file.path)); }
   private async state(): Promise<{ session: Session; inventory: ProjectFile[]; baseline: LocalSyncMeta; remote: SyncMeta; status: SyncStatus }> {
     const connection = await this.assertProject();
     const session = await this.tokens();
@@ -200,12 +235,41 @@ export class ProjectDriveSync {
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
 
+  /** Read both sides of a current conflict without changing either side. */
+  async conflictPreview(requested: ConflictInfo): Promise<ConflictPreview> {
+    const connection = await this.assertProject();
+    const files = await this.workspaceFiles(connection.project);
+    const { session, inventory, remote, status } = await this.state();
+    const conflict = status.conflicts.find((item) => item.path === requested.path && item.kind === requested.kind);
+    if (!conflict) throw new Error("This conflict is no longer current. Run Check again.");
+
+    const local = inventory.find((file) => file.path === conflict.path);
+    const remoteFile = remote.files[conflict.id];
+    const binary = Boolean(local?.binary || (remoteFile && remoteIsBinary(remoteFile.mimeType)));
+    const preview: ConflictPreview = {
+      binary,
+      local: { exists: !!local, name: conflict.path, size: local?.size, md5: local?.md5 },
+      remote: {
+        exists: !!remoteFile,
+        name: remoteFile?.name ?? conflict.remoteName ?? conflict.path,
+        size: remoteFile?.size ? Number(remoteFile.size) : undefined,
+        md5: remoteFile?.md5Checksum,
+      },
+    };
+    if (!binary) {
+      if (local) preview.local.text = await files.read(conflict.path);
+      if (remoteFile) preview.remote.text = (await readRemote(this.api, session.accessToken, conflict.id)).text;
+    }
+    return preview;
+  }
+
   private async saveSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[], baseline: LocalSyncMeta): Promise<void> {
     await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(projectId, remote, inventory, baseline));
   }
 
   async push(allowDeletes = false): Promise<SyncSummary> {
     const connection = await this.assertProject();
+    const files = await this.workspaceFiles(connection.project);
     const { session, inventory, baseline, remote, status } = await this.state();
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length) throw new Error("Google Drive has pending changes. Pull before pushing.");
@@ -222,7 +286,7 @@ export class ProjectDriveSync {
         if (!id || !renamedIds.has(id)) summary.skipped++;
         continue;
       }
-      const raw = await this.api.projectFiles!.read(local.path);
+      const raw = await files.read(local.path);
       const content = local.binary ? decodeDataURL(raw) : raw;
       if (action.upload === "update" && id) { await updateRemote(this.api, session.accessToken, id, content, mimeType(local.path)); summary.updated++; }
       else { await createRemote(this.api, session.accessToken, session.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
@@ -242,6 +306,7 @@ export class ProjectDriveSync {
 
   async pull(allowDeletes = false, onProgress?: (progress: SyncProgress) => void): Promise<SyncSummary> {
     const connection = await this.assertProject();
+    const workspaceFiles = await this.workspaceFiles(connection.project);
     const { session, inventory, baseline, remote, status } = await this.state();
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteDeletes.length && !allowDeletes) throw new Error(`Pull will delete ${status.remoteDeletes.length} local file(s). Confirm deletion first.`);
@@ -264,15 +329,15 @@ export class ProjectDriveSync {
         }
         let local = localByPath.get(file.name);
         if (previous && previous.name !== file.name && localByPath.has(previous.name) && !local) {
-          await this.api.projectFiles!.rename(previous.name, file.name); summary.renamed++;
+          await workspaceFiles.rename(previous.name, file.name); summary.renamed++;
           local = localByPath.get(previous.name);
         }
         if (local?.md5 === file.md5Checksum) summary.skipped++;
         else {
           const content = await readRemote(this.api, session.accessToken, id);
           const value = remoteIsBinary(file.mimeType) ? content.buffer : content.text;
-          if (local) { await this.api.projectFiles!.update(file.name, value); summary.updated++; }
-          else { await this.api.projectFiles!.create(file.name, value); summary.created++; }
+          if (local) { await workspaceFiles.update(file.name, value); summary.updated++; }
+          else { await workspaceFiles.create(file.name, value); summary.created++; }
         }
         completed++;
         onProgress?.({ phase: "pull", completed, total: files.length, path: file.name });
@@ -285,7 +350,7 @@ export class ProjectDriveSync {
       let deleted = 0;
       onProgress?.({ phase: "delete", completed: deleted, total: status.remoteDeletes.length });
       for (const path of status.remoteDeletes) {
-        await this.api.projectFiles!.delete(path); summary.deleted++; deleted++;
+        await workspaceFiles.delete(path); summary.deleted++; deleted++;
         onProgress?.({ phase: "delete", completed: deleted, total: status.remoteDeletes.length, path });
       }
     }
@@ -302,6 +367,7 @@ export class ProjectDriveSync {
    */
   async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote" }>): Promise<number> {
     const connection = await this.assertProject();
+    const files = await this.workspaceFiles(connection.project);
     const { session, inventory, baseline, remote, status } = await this.state();
     const current = new Map(status.conflicts.map((conflict) => [conflict.path, conflict]));
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -309,12 +375,12 @@ export class ProjectDriveSync {
     let resolved = 0;
 
     const readLocal = async (path: string): Promise<string | ArrayBuffer> => {
-      const raw = await this.api.projectFiles!.read(path);
+      const raw = await files.read(path);
       return localByPath.get(path)?.binary ? decodeDataURL(raw) : raw;
     };
     const writeLocal = async (path: string, value: string | ArrayBuffer): Promise<void> => {
-      if (localByPath.has(path)) await this.api.projectFiles!.update(path, value);
-      else await this.api.projectFiles!.create(path, value);
+      if (localByPath.has(path)) await files.update(path, value);
+      else await files.create(path, value);
     };
 
     for (const { conflict: requested, choice } of resolutions) {
@@ -328,7 +394,7 @@ export class ProjectDriveSync {
           touchedRemote = true;
         } else {
           await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
-          await this.api.projectFiles!.delete(conflict.path);
+          await files.delete(conflict.path);
         }
       } else if (conflict.kind === "localDeleteRemoteEdit") {
         if (!remoteFile) continue;
@@ -351,7 +417,7 @@ export class ProjectDriveSync {
         } else {
           await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
           const content = await readRemote(this.api, session.accessToken, conflict.id);
-          if (remoteFile.name !== conflict.path) await this.api.projectFiles!.delete(conflict.path);
+          if (remoteFile.name !== conflict.path) await files.delete(conflict.path);
           await writeLocal(remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? content.buffer : content.text);
         }
       }

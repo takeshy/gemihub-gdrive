@@ -1,9 +1,9 @@
 {
   "id": "gemihub-gdrive",
   "name": "GemiHub Google Drive Sync",
-  "version": "0.1.4",
+  "version": "0.1.8",
   "minAppVersion": "0.2.0",
-  "description": "Synchronize one GemiHub Desktop project with GemiHub through Google Drive.",
+  "description": "Synchronize one GemiHub Desktop Workspace with GemiHub through Google Drive.",
   "author": "GemiHub",
   "permissions": ["files", "storage", "network"]
 }
