@@ -1,6 +1,6 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
 import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
-import type { ConflictInfo, LocalSyncMeta, PluginAPI, Project, ProjectFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
+import type { ConflictInfo, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
@@ -20,10 +20,10 @@ function decodeDataURL(value: string): ArrayBuffer {
 }
 
 function remoteIsBinary(mime: string): boolean { return !mime.startsWith("text/") && !TEXT_MIME.has(mime); }
-function emptySnapshot(projectId: string): LocalSyncMeta { return { projectId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
+function emptySnapshot(workspaceId: string): LocalSyncMeta { return { workspaceId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
 
-function resolveLocalIds(inventory: ProjectFile[], baseline: LocalSyncMeta): Map<string, string> {
+function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): Map<string, string> {
   const resolved = new Map<string, string>();
   const claimedIds = new Set<string>();
 
@@ -42,7 +42,7 @@ function resolveLocalIds(inventory: ProjectFile[], baseline: LocalSyncMeta): Map
     const ids = oldByChecksum.get(previous.md5Checksum) ?? [];
     ids.push(id); oldByChecksum.set(previous.md5Checksum, ids);
   }
-  const localByChecksum = new Map<string, ProjectFile[]>();
+  const localByChecksum = new Map<string, WorkspaceFile[]>();
   for (const local of inventory) {
     if (resolved.has(local.path)) continue;
     const files = localByChecksum.get(local.md5) ?? [];
@@ -76,7 +76,7 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
  * so pending local edits, renames, deletes, and unresolved conflicts survive a
  * pull or a partial conflict resolution.
  */
-export function computeSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[], baseline: LocalSyncMeta): LocalSyncMeta {
+export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): LocalSyncMeta {
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
   const files: LocalSyncMeta["files"] = {}, pathToId: Record<string, string> = {};
   for (const [id, file] of Object.entries(remote.files)) {
@@ -88,10 +88,10 @@ export function computeSnapshot(projectId: string, remote: SyncMeta, inventory: 
     if (!entry) continue;
     files[id] = entry; pathToId[entry.name] = id;
   }
-  return { projectId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId };
+  return { workspaceId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId };
 }
 
-export interface PushAction { local: ProjectFile; id: string | undefined; rename: boolean; upload: "create" | "update" | null }
+export interface PushAction { local: WorkspaceFile; id: string | undefined; rename: boolean; upload: "create" | "update" | null }
 
 export interface ConflictPreview {
   binary: boolean;
@@ -99,7 +99,7 @@ export interface ConflictPreview {
   remote: { exists: boolean; name: string; size?: number; md5?: string; text?: string };
 }
 
-export function planPush(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
+export function planPush(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
   const localIds = resolveLocalIds(inventory, baseline);
   return inventory.map((local) => {
     let id = localIds.get(local.path);
@@ -117,7 +117,7 @@ export function planPush(inventory: ProjectFile[], baseline: LocalSyncMeta, remo
   });
 }
 
-export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
+export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
   const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [file.name, { id, file }]));
   const localIds = resolveLocalIds(inventory, baseline);
@@ -158,87 +158,65 @@ export function computeStatus(inventory: ProjectFile[], baseline: LocalSyncMeta,
   return { localChanges: sorted(localChanges), remoteChanges: sorted(remoteChanges), localOnly: sorted(localOnly), remoteOnly: sorted(remoteOnly), localDeletes: sorted(localDeletes), remoteDeletes: sorted(remoteDeletes), conflicts: conflicts.sort((a, b) => a.path.localeCompare(b.path)) };
 }
 
-export class ProjectDriveSync {
+export class WorkspaceDriveSync {
   private session: Session | null = null;
-  private selectedFiles: WorkspaceFilesAPI | null = null;
   constructor(private api: PluginAPI) {
-    if ((!api.files && !api.projectFiles) || !api.storage || !api.network) throw new Error("This plugin requires Workspace files, storage, and network APIs from GemiHub Desktop.");
+    if (!api.workspaceFiles || !api.storage || !api.network) throw new Error("This plugin requires Workspace files, storage, and network APIs from GemiHub Desktop.");
   }
 
-  private async workspaceFiles(expected?: Project): Promise<WorkspaceFilesAPI> {
-    if (this.selectedFiles) return this.selectedFiles;
-    const available: Array<{ files: WorkspaceFilesAPI; current: Project }> = [];
-    for (const files of [this.api.files, this.api.projectFiles]) {
-      if (!files || typeof files.current !== "function" || typeof files.inventory !== "function") continue;
-      const current = await files.current();
-      if (current) available.push({ files, current });
-    }
-    const selected = expected
-      ? available.find(({ current }) => current.id === expected.id && current.path === expected.path)
-      : available[0];
-    if (!selected) throw new Error("Select a Workspace before connecting Google Drive.");
-    this.selectedFiles = selected.files;
-    return selected.files;
+  private async workspaceFiles(_expected?: Workspace): Promise<WorkspaceFilesAPI> {
+    return this.api.workspaceFiles!;
   }
 
   async connection(): Promise<StoredConnection | null> { return await this.api.storage!.get(CONNECTION_KEY) as StoredConnection | null; }
   async setup(token: string): Promise<StoredConnection> {
-    const project = await (await this.workspaceFiles()).current();
-    if (!project) throw new Error("Select a Workspace before connecting Google Drive.");
-    const connection = await createConnection(this.api, token, project);
+    const workspace = await (await this.workspaceFiles()).current();
+    if (!workspace) throw new Error("Select a Workspace before connecting Google Drive.");
+    const connection = await createConnection(this.api, token, workspace);
     await this.api.storage!.set(CONNECTION_KEY, connection);
     await this.api.storage!.set(SNAPSHOT_KEY, null);
     return connection;
   }
-  async reset(): Promise<void> { this.session = null; this.selectedFiles = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
+  async reset(): Promise<void> { this.session = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
   async unlock(password: string): Promise<void> {
     const connection = await this.connection();
     if (!connection) throw new Error("Google Drive is not connected.");
-    await this.assertProject(connection);
+    await this.assertWorkspace(connection);
     this.session = await unlockConnection(this.api, connection, password);
   }
-  private async assertProject(connection?: StoredConnection): Promise<StoredConnection> {
+  private async assertWorkspace(connection?: StoredConnection): Promise<StoredConnection> {
     const saved = connection ?? await this.connection();
     if (!saved) throw new Error("Google Drive is not connected.");
-    const current = await (await this.workspaceFiles(saved.project)).current();
+    const current = await (await this.workspaceFiles(saved.workspace)).current();
     if (!current) throw new Error("Select a Workspace before syncing.");
-    if (current.id !== saved.project.id || current.path !== saved.project.path) {
-      // Desktop formerly exposed its compatibility project (id "project",
-      // name "Workspace") to this plugin. Migrate only that known legacy
-      // shape; real named project connections still require an explicit reset.
-      if (saved.project.id === "project" && saved.project.name === "Workspace") {
-        const migrated = { ...saved, project: current };
-        await this.api.storage!.set(CONNECTION_KEY, migrated);
-        await this.api.storage!.set(SNAPSHOT_KEY, null);
-        return migrated;
-      }
-      throw new Error(`This connection belongs to Workspace “${saved.project.name}”. Switch back to that Workspace before syncing, or reset the connection.`);
+    if (current.id !== saved.workspace.id || current.path !== saved.workspace.path) {
+      throw new Error(`This connection belongs to Workspace “${saved.workspace.name}”. Switch back to that Workspace before syncing, or reset the connection.`);
     }
     return saved;
   }
   private async tokens(): Promise<Session> {
-    await this.assertProject();
+    await this.assertWorkspace();
     if (!this.session) throw new Error("Unlock the connection first.");
     this.session = await refreshSession(this.api, this.session);
     return this.session;
   }
-  private async snapshot(projectId: string): Promise<LocalSyncMeta> {
+  private async snapshot(workspaceId: string): Promise<LocalSyncMeta> {
     const value = await this.api.storage!.get(SNAPSHOT_KEY) as LocalSyncMeta | null;
-    return value?.projectId === projectId ? value : emptySnapshot(projectId);
+    return value?.workspaceId === workspaceId ? value : emptySnapshot(workspaceId);
   }
-  private async inventory(): Promise<ProjectFile[]> { return (await (await this.workspaceFiles()).inventory()).filter((file) => syncablePath(file.path)); }
-  private async state(): Promise<{ session: Session; inventory: ProjectFile[]; baseline: LocalSyncMeta; remote: SyncMeta; status: SyncStatus }> {
-    const connection = await this.assertProject();
+  private async inventory(): Promise<WorkspaceFile[]> { return (await (await this.workspaceFiles()).inventory()).filter((file) => syncablePath(file.path)); }
+  private async state(): Promise<{ session: Session; inventory: WorkspaceFile[]; baseline: LocalSyncMeta; remote: SyncMeta; status: SyncStatus }> {
+    const connection = await this.assertWorkspace();
     const session = await this.tokens();
-    const [inventory, baseline, remote] = await Promise.all([this.inventory(), this.snapshot(connection.project.id), readSyncMeta(this.api, session.accessToken, session.rootFolderId)]);
+    const [inventory, baseline, remote] = await Promise.all([this.inventory(), this.snapshot(connection.workspace.id), readSyncMeta(this.api, session.accessToken, session.rootFolderId)]);
     return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
 
   /** Read both sides of a current conflict without changing either side. */
   async conflictPreview(requested: ConflictInfo): Promise<ConflictPreview> {
-    const connection = await this.assertProject();
-    const files = await this.workspaceFiles(connection.project);
+    const connection = await this.assertWorkspace();
+    const files = await this.workspaceFiles(connection.workspace);
     const { session, inventory, remote, status } = await this.state();
     const conflict = status.conflicts.find((item) => item.path === requested.path && item.kind === requested.kind);
     if (!conflict) throw new Error("This conflict is no longer current. Run Check again.");
@@ -263,13 +241,13 @@ export class ProjectDriveSync {
     return preview;
   }
 
-  private async saveSnapshot(projectId: string, remote: SyncMeta, inventory: ProjectFile[], baseline: LocalSyncMeta): Promise<void> {
-    await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(projectId, remote, inventory, baseline));
+  private async saveSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): Promise<void> {
+    await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(workspaceId, remote, inventory, baseline));
   }
 
   async push(allowDeletes = false): Promise<SyncSummary> {
-    const connection = await this.assertProject();
-    const files = await this.workspaceFiles(connection.project);
+    const connection = await this.assertWorkspace();
+    const files = await this.workspaceFiles(connection.workspace);
     const { session, inventory, baseline, remote, status } = await this.state();
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length) throw new Error("Google Drive has pending changes. Pull before pushing.");
@@ -300,13 +278,13 @@ export class ProjectDriveSync {
     }
     const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
     const writtenRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
-    await this.saveSnapshot(connection.project.id, writtenRemote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace.id, writtenRemote, await this.inventory(), baseline);
     return summary;
   }
 
   async pull(allowDeletes = false, onProgress?: (progress: SyncProgress) => void): Promise<SyncSummary> {
-    const connection = await this.assertProject();
-    const workspaceFiles = await this.workspaceFiles(connection.project);
+    const connection = await this.assertWorkspace();
+    const workspaceFiles = await this.workspaceFiles(connection.workspace);
     const { session, inventory, baseline, remote, status } = await this.state();
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteDeletes.length && !allowDeletes) throw new Error(`Pull will delete ${status.remoteDeletes.length} local file(s). Confirm deletion first.`);
@@ -355,7 +333,7 @@ export class ProjectDriveSync {
       }
     }
     onProgress?.({ phase: "snapshot", completed: 0, total: 1 });
-    await this.saveSnapshot(connection.project.id, remote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace.id, remote, await this.inventory(), baseline);
     onProgress?.({ phase: "snapshot", completed: 1, total: 1 });
     return summary;
   }
@@ -366,8 +344,8 @@ export class ProjectDriveSync {
    * `sync_conflicts/` folder before it is overwritten or deleted.
    */
   async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote" }>): Promise<number> {
-    const connection = await this.assertProject();
-    const files = await this.workspaceFiles(connection.project);
+    const connection = await this.assertWorkspace();
+    const files = await this.workspaceFiles(connection.workspace);
     const { session, inventory, baseline, remote, status } = await this.state();
     const current = new Map(status.conflicts.map((conflict) => [conflict.path, conflict]));
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -429,7 +407,7 @@ export class ProjectDriveSync {
       const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
       finalRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
     }
-    await this.saveSnapshot(connection.project.id, finalRemote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace.id, finalRemote, await this.inventory(), baseline);
     return resolved;
   }
 }

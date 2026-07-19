@@ -2,10 +2,10 @@
 import { assertEquals } from "jsr:@std/assert";
 import { computeSnapshot, computeStatus, parallelForEach, planPush } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
-import type { LocalSyncMeta, ProjectFile, SyncMeta } from "./types.ts";
+import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
-const local = (path: string, md5: string): ProjectFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
-const baseline = (md5 = "a"): LocalSyncMeta => ({ projectId: "p", lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5 } }, pathToId: { "notes/a.md": "id" } });
+const local = (path: string, md5: string): WorkspaceFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
+const baseline = (md5 = "a"): LocalSyncMeta => ({ workspaceId: "p", lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5 } }, pathToId: { "notes/a.md": "id" } });
 const remote = (md5 = "a"): SyncMeta => ({ lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5, mimeType: "text/markdown", modifiedTime: "" } } });
 
 Deno.test("classifies local, remote, delete, and conflict changes", () => {
@@ -19,7 +19,7 @@ Deno.test("classifies local, remote, delete, and conflict changes", () => {
 });
 
 Deno.test("classifies an untracked file that differs from a same-named remote file", () => {
-  const empty: LocalSyncMeta = { projectId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
+  const empty: LocalSyncMeta = { workspaceId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
   assertEquals(computeStatus([local("notes/a.md", "b")], empty, remote()).conflicts, [
     { path: "notes/a.md", id: "id", remoteName: "notes/a.md", kind: "untracked" },
   ]);
@@ -33,7 +33,7 @@ Deno.test("classifies a checksum-preserving local rename without a delete", () =
 
 Deno.test("does not mistake a duplicate-content file for a deleted file rename", () => {
   const sameContentBaseline: LocalSyncMeta = {
-    projectId: "p", lastUpdatedAt: "",
+    workspaceId: "p", lastUpdatedAt: "",
     files: { a: { name: "a.md", md5Checksum: "same" }, b: { name: "b.md", md5Checksum: "same" } },
     pathToId: { "a.md": "a", "b.md": "b" },
   };
@@ -76,7 +76,7 @@ Deno.test("recognizes already-applied remote state after an interrupted pull", (
 });
 
 Deno.test("push adopts identical untracked files without re-upload or rename", () => {
-  const empty: LocalSyncMeta = { projectId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
+  const empty: LocalSyncMeta = { workspaceId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
   assertEquals(planPush([local("notes/a.md", "a")], empty, remote()), [
     { local: local("notes/a.md", "a"), id: "id", rename: false, upload: null },
   ]);
@@ -133,7 +133,7 @@ Deno.test("snapshot keeps pending local edits, deletes, and unresolved conflicts
     },
   };
   const previous: LocalSyncMeta = {
-    projectId: "p", lastUpdatedAt: "",
+    workspaceId: "p", lastUpdatedAt: "",
     files: {
       synced: { name: "synced.md", md5Checksum: "s" },
       edited: { name: "edited.md", md5Checksum: "e" },

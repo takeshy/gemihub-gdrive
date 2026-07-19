@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { lineDiff } from "./diff";
-import { ProjectDriveSync, type ConflictPreview } from "./sync";
+import { WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 
 function summary(value: SyncSummary): string {
@@ -73,10 +73,10 @@ function ConflictComparison({ value }: { value: ConflictPreview }) {
 
 export function DriveSyncView({ api }: { api: PluginAPI }) {
   const client = useMemo(() => {
-    try { return new ProjectDriveSync(api); }
+    try { return new WorkspaceDriveSync(api); }
     catch (error) { return error instanceof Error ? error.message : String(error); }
   }, [api]);
-  const [connection, setConnection] = useState<Awaited<ReturnType<ProjectDriveSync["connection"]>>>(null);
+  const [connection, setConnection] = useState<Awaited<ReturnType<WorkspaceDriveSync["connection"]>>>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [token, setToken] = useState("");
   const [password, setPassword] = useState("");
@@ -124,7 +124,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const pull = async () => {
     const next = await client.status(); setStatus(next);
     const deletions = next.remoteDeletes.length;
-    if (deletions && !window.confirm(`Pull will delete ${deletions} local project file(s). Continue?`)) return;
+    if (deletions && !window.confirm(`Pull will delete ${deletions} local workspace file(s). Continue?`)) return;
     setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
     setStatus(await client.status()); setPreview(null);
   };
@@ -155,14 +155,14 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     {!connection ? <div className="gdrive-form">
       <p>GemiHubで暗号化を有効にし、設定 → 同期 → 外部同期から同期トークンを生成してください。現在選択中のWorkspace全体がこの接続に固定されます。</p>
       <label><span>GemiHub sync token</span><textarea rows={5} value={token} onChange={(event) => setToken(event.target.value)} disabled={busy} /></label>
-      <button type="button" disabled={busy || !token.trim()} onClick={() => void run(async () => { const saved = await client.setup(token); setConnection(saved); setToken(""); setMessage(`Connected to Workspace “${saved.project.name}”.`); })}>Connect Workspace</button>
+      <button type="button" disabled={busy || !token.trim()} onClick={() => void run(async () => { const saved = await client.setup(token); setConnection(saved); setToken(""); setMessage(`Connected to Workspace “${saved.workspace.name}”.`); })}>Connect Workspace</button>
     </div> : !unlocked ? <div className="gdrive-form">
-      <p>接続先Workspace: <strong>{connection.project.name}</strong></p>
+      <p>接続先Workspace: <strong>{connection.workspace.name}</strong></p>
       <label><span>GemiHub encryption password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} /></label>
       <button type="button" disabled={busy || !password} onClick={() => void run(async () => { await client.unlock(password); setPassword(""); setUnlocked(true); setMessage("Drive connection unlocked for this session."); })}>Unlock</button>
       <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => { await client.reset(); setConnection(null); setStatus(null); setMessage("Connection reset."); })}>Reset connection</button>
     </div> : <div className="gdrive-actions">
-      <div className="gdrive-project"><span>Workspace</span><strong>{connection.project.name}</strong><small>{connection.project.path}</small></div>
+      <div className="gdrive-workspace"><span>Workspace</span><strong>{connection.workspace.name}</strong><small>{connection.workspace.path}</small></div>
       {status && <div className="gdrive-status-grid">
         <span>Local changes <b>{status.localChanges.length + status.localOnly.length}</b></span>
         <span>Remote changes <b>{status.remoteChanges.length + status.remoteOnly.length}</b></span>

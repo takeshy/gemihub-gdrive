@@ -1,13 +1,13 @@
 import { decryptHybridData, decryptPrivateKey } from "./crypto";
 import { request } from "./transport";
-import type { PluginAPI, Project } from "./types";
+import type { PluginAPI, Workspace } from "./types";
 
 export interface StoredConnection {
   data: string;
   encryptedPrivateKey: string;
   salt: string;
   rootFolderId: string;
-  project: Project;
+  workspace: Workspace;
 }
 
 export interface Session { accessToken: string; refreshToken: string; apiOrigin: string; rootFolderId: string; expiryTime: number }
@@ -29,7 +29,7 @@ async function driveJSON(api: PluginAPI, url: string, accessToken: string): Prom
   return response.json;
 }
 
-export async function createConnection(api: PluginAPI, token: string, project: Project): Promise<StoredConnection> {
+export async function createConnection(api: PluginAPI, token: string, workspace: Workspace): Promise<StoredConnection> {
   const temporary = decodeMigrationToken(token);
   const query = encodeURIComponent(`name='_encrypted-auth.json' and '${temporary.rootFolderId}' in parents and trashed=false`);
   const listed = await driveJSON(api, `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id)&pageSize=1`, temporary.accessToken) as { files?: Array<{ id: string }> };
@@ -39,7 +39,7 @@ export async function createConnection(api: PluginAPI, token: string, project: P
   if (response.status !== 200) throw new Error(`Could not read encrypted authentication: HTTP ${response.status}`);
   const auth = response.json as { data?: unknown; encryptedPrivateKey?: unknown; salt?: unknown };
   if (typeof auth.data !== "string" || typeof auth.encryptedPrivateKey !== "string" || typeof auth.salt !== "string") throw new Error("Invalid _encrypted-auth.json.");
-  return { data: auth.data, encryptedPrivateKey: auth.encryptedPrivateKey, salt: auth.salt, rootFolderId: temporary.rootFolderId, project };
+  return { data: auth.data, encryptedPrivateKey: auth.encryptedPrivateKey, salt: auth.salt, rootFolderId: temporary.rootFolderId, workspace };
 }
 
 export async function unlockConnection(api: PluginAPI, connection: StoredConnection, password: string): Promise<Session> {

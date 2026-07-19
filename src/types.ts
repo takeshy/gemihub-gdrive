@@ -1,11 +1,11 @@
-export interface Project { id: string; name: string; path: string }
-export interface ProjectFile { path: string; size: number; createdTime: number; modTime: number; md5: string; binary: boolean }
+export interface Workspace { id: string; name: string; path: string }
+export interface WorkspaceFile { path: string; size: number; createdTime: number; modTime: number; md5: string; binary: boolean }
 export interface HTTPRequest { url: string; method?: string; headers?: Record<string, string>; body?: string; bodyBase64?: string }
 export interface HTTPResponse { status: number; headers: Record<string, string>; body: string; bodyBase64: string }
 
 export interface WorkspaceFilesAPI {
-  current(): Promise<Project | null>;
-  inventory(): Promise<ProjectFile[]>;
+  current(): Promise<Workspace | null>;
+  inventory(): Promise<WorkspaceFile[]>;
   read(path: string): Promise<string>;
   create(path: string, content: string | ArrayBuffer): Promise<void>;
   update(path: string, content: string | ArrayBuffer): Promise<void>;
@@ -17,9 +17,7 @@ export interface WorkspaceFilesAPI {
 export interface PluginAPI {
   language: string;
   registerView(view: { id: string; name: string; icon?: string; location: "sidebar" | "main"; component: (props: { api: PluginAPI }) => unknown }): void;
-  files?: WorkspaceFilesAPI;
-  /** Compatibility fallback when Desktop exposes its Workspace as a project. */
-  projectFiles?: WorkspaceFilesAPI;
+  workspaceFiles?: WorkspaceFilesAPI;
   storage?: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; getAll(): Promise<Record<string, unknown>> };
   network?: { request(request: HTTPRequest): Promise<HTTPResponse> };
 }
@@ -37,7 +35,7 @@ export interface FileSyncMeta {
 
 export interface SyncMeta { lastUpdatedAt: string; files: Record<string, FileSyncMeta> }
 export interface LocalSyncMeta {
-  projectId: string;
+  workspaceId: string;
   lastUpdatedAt: string;
   files: Record<string, { name: string; md5Checksum: string }>;
   pathToId: Record<string, string>;
