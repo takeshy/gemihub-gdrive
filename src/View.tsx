@@ -32,6 +32,19 @@ function previewBlockReason(status: SyncStatus, direction: PreviewDirection): st
   return null;
 }
 
+type StatKey = "local" | "remote" | "pushDeletes" | "pullDeletes";
+const STAT_LABELS: Record<StatKey, string> = { local: "Local changes", remote: "Remote changes", pushDeletes: "Push deletes", pullDeletes: "Pull deletes" };
+
+function statItems(status: SyncStatus, key: StatKey): PreviewItem[] {
+  const items = new Map<string, PreviewItem["type"]>();
+  const add = (paths: string[], type: PreviewItem["type"]) => paths.forEach((path) => items.set(path, type));
+  if (key === "local") { add(status.localOnly, "new"); add(status.localChanges, "modified"); }
+  else if (key === "remote") { add(status.remoteOnly, "new"); add(status.remoteChanges, "modified"); }
+  else if (key === "pushDeletes") add(status.localDeletes, "deleted");
+  else add(status.remoteDeletes, "deleted");
+  return [...items].map(([path, type]) => ({ path, type })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function conflictLabel(kind: ConflictInfo["kind"]): string {
   if (kind === "localEditRemoteDelete") return "edited here, deleted on Drive";
   if (kind === "localDeleteRemoteEdit") return "deleted here, edited on Drive";
@@ -85,6 +98,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [preview, setPreview] = useState<PreviewDirection | null>(null);
+  const [statDetail, setStatDetail] = useState<StatKey | null>(null);
   const [conflictPreviews, setConflictPreviews] = useState<Record<string, { open: boolean; loading?: boolean; value?: ConflictPreview; error?: string }>>({});
 
   useEffect(() => {
@@ -105,20 +119,22 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
 
   const refresh = async () => {
     const next = await client.status();
-    setStatus(next); setPreview(null); setMessage(countStatus(next));
+    setStatus(next); setPreview(null); setStatDetail(null); setMessage(countStatus(next));
   };
 
   const prepare = async (direction: PreviewDirection) => {
     const next = await client.status();
-    setStatus(next); setPreview(direction); setMessage(countStatus(next));
+    setStatus(next); setPreview(direction); setStatDetail(null); setMessage(countStatus(next));
   };
+
+  const toggleStatDetail = (key: StatKey) => { setPreview(null); setStatDetail((current) => (current === key ? null : key)); };
 
   const push = async () => {
     const next = await client.status(); setStatus(next);
     const deletions = next.localDeletes.length;
     if (deletions && !window.confirm(`Push will move ${deletions} file(s) to GemiHub trash. Continue?`)) return;
     setMessage(`Push complete: ${summary(await client.push(deletions > 0))}`);
-    setStatus(await client.status()); setPreview(null);
+    setStatus(await client.status()); setPreview(null); setStatDetail(null);
   };
 
   const pull = async () => {
@@ -126,7 +142,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const deletions = next.remoteDeletes.length;
     if (deletions && !window.confirm(`Pull will delete ${deletions} local workspace file(s). Continue?`)) return;
     setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
-    setStatus(await client.status()); setPreview(null);
+    setStatus(await client.status()); setPreview(null); setStatDetail(null);
   };
 
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
@@ -164,12 +180,16 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     </div> : <div className="gdrive-actions">
       <div className="gdrive-workspace"><span>Workspace</span><strong>{connection.workspace.name}</strong><small>{connection.workspace.path}</small></div>
       {status && <div className="gdrive-status-grid">
-        <span>Local changes <b>{status.localChanges.length + status.localOnly.length}</b></span>
-        <span>Remote changes <b>{status.remoteChanges.length + status.remoteOnly.length}</b></span>
-        <span>Push deletes <b>{status.localDeletes.length}</b></span>
-        <span>Pull deletes <b>{status.remoteDeletes.length}</b></span>
+        <button type="button" className={statDetail === "local" ? "is-open" : ""} onClick={() => toggleStatDetail("local")}>Local changes <b>{status.localChanges.length + status.localOnly.length}</b></button>
+        <button type="button" className={statDetail === "remote" ? "is-open" : ""} onClick={() => toggleStatDetail("remote")}>Remote changes <b>{status.remoteChanges.length + status.remoteOnly.length}</b></button>
+        <button type="button" className={statDetail === "pushDeletes" ? "is-open" : ""} onClick={() => toggleStatDetail("pushDeletes")}>Push deletes <b>{status.localDeletes.length}</b></button>
+        <button type="button" className={statDetail === "pullDeletes" ? "is-open" : ""} onClick={() => toggleStatDetail("pullDeletes")}>Pull deletes <b>{status.remoteDeletes.length}</b></button>
         <span className={status.conflicts.length ? "danger" : ""}>Conflicts <b>{status.conflicts.length}</b></span>
       </div>}
+      {status && statDetail ? <div className="gdrive-preview">
+        <div className="gdrive-preview-header"><strong>{STAT_LABELS[statDetail]}</strong><span>{statItems(status, statDetail).length} file(s)</span></div>
+        {statItems(status, statDetail).length ? <ul>{statItems(status, statDetail).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files.</p>}
+      </div> : null}
       {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
         <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
         <p>Choose which side to keep for each file. The other side is backed up to <code>sync_conflicts/</code> on Drive.</p>

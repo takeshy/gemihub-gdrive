@@ -11,7 +11,10 @@
 .gdrive-workspace { border: 1px solid var(--border); border-radius: 8px; padding: 9px; }
 .gdrive-workspace > span { color: var(--muted); font-size: .7rem; text-transform: uppercase; }
 .gdrive-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.gdrive-status-grid span { display: flex; justify-content: space-between; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 7px; }
+.gdrive-status-grid span, .gdrive-status-grid button { display: flex; justify-content: space-between; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 7px; background: transparent; color: var(--text); font: inherit; text-align: left; }
+.gdrive-status-grid button { cursor: pointer; }
+.gdrive-status-grid button:hover { border-color: var(--accent); }
+.gdrive-status-grid button.is-open { border-color: var(--accent); color: var(--accent); }
 .gdrive-status-grid .danger { border-color: var(--danger); color: var(--danger); }
 .gdrive-buttons { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 .gdrive-sync details ul { margin: 7px 0 0; padding-left: 20px; color: var(--danger); overflow-wrap: anywhere; }

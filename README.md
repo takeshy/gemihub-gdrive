@@ -19,6 +19,7 @@ GemiHub Desktopのactive Workspace全体を、GemiHubが利用するGoogle Drive
 - Pushによるremote削除はGemiHubの`trash/`へ移動
 - Pullによるlocal削除は実行前に確認
 - Pull/Pushは実行前にnew、modified、deleted、conflictの対象ファイル一覧を表示
+- CheckでStatus表示後、`Local changes`/`Remote changes`/`Push deletes`/`Pull deletes`のラベルをクリックすると対象ファイル一覧を表示
 - Pullは最大5ファイルを並列処理し、処理件数と現在のpathを表示
 
 ## GemiHub側の準備
