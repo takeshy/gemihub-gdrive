@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeSnapshot, computeStatus, isBinaryPath, isTextPath, parallelForEach, planPush } from "./sync.ts";
+import { computeSnapshot, computeStatus, isBinaryPath, isTextPath, parallelForEach, planPush, unresolvedBaselineEntries } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
@@ -81,6 +81,43 @@ Deno.test("resolves a same-size group of duplicate-content renames without flagg
   assertEquals(status.localDeletes, []);
   assertEquals(status.localOnly, []);
   assertEquals(status.localChanges, ["a.md", "b.md"]);
+});
+
+Deno.test("never resolves a stale duplicate's delete target to a different id that is still live", () => {
+  // Drive can end up with several objects sharing one `name` (leftover from
+  // past rename churn). One id ("live") still matches the current local
+  // file; two others ("orphan1", "orphan2") share that same name but no
+  // longer correspond to anything local. Deletion must be decided per id,
+  // never by looking a deduped name back up to a single id — otherwise a
+  // name-based lookup could resolve to "live" and move the still-current
+  // file to trash instead of the actual orphans.
+  const sharedName = "Dashboards/Kanbans/tasks.kanban";
+  const testBaseline: LocalSyncMeta = {
+    workspaceId: "p", lastUpdatedAt: "",
+    files: {
+      live: { name: sharedName, md5Checksum: "current" },
+      orphan1: { name: "Dashboards/Kanbans/Tasks.kanban", md5Checksum: "old1" },
+      orphan2: { name: sharedName, md5Checksum: "old2" },
+    },
+    // pathToId can only ever remember one id per exact name — the live one.
+    pathToId: { [sharedName]: "live" },
+  };
+  const testRemote: SyncMeta = {
+    lastUpdatedAt: "",
+    files: {
+      live: { name: sharedName, md5Checksum: "current", mimeType: "text/plain", modifiedTime: "" },
+      orphan1: { name: "Dashboards/Kanbans/Tasks.kanban", md5Checksum: "old1", mimeType: "text/plain", modifiedTime: "" },
+      orphan2: { name: sharedName, md5Checksum: "old2", mimeType: "text/plain", modifiedTime: "" },
+    },
+  };
+  // The live id is claimed by the current local file (as resolveLocalIds
+  // would do via the exact-path match); orphan1/orphan2 are not claimed by
+  // anything.
+  const localIds = new Map([[sharedName, "live"]]);
+  const unresolved = unresolvedBaselineEntries(localIds, testBaseline, testRemote);
+  const ids = unresolved.map((entry) => entry.id).sort();
+  assertEquals(ids, ["orphan1", "orphan2"]);
+  assertEquals(ids.includes("live"), false);
 });
 
 Deno.test("treats rename-delete races as conflicts", () => {

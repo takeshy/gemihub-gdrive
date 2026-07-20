@@ -1,6 +1,6 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
 import { createRemote, ensureFolder, isUserExcludedPath, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
-import type { ConflictInfo, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
+import type { ConflictInfo, FileSyncMeta, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
@@ -75,6 +75,23 @@ function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): M
   return resolved;
 }
 
+export interface UnresolvedBaselineEntry { id: string; previous: LocalSyncMeta["files"][string]; currentRemote: FileSyncMeta | undefined }
+
+/**
+ * Baseline ids whose local file no longer resolves to them: either a real
+ * delete, or an orphaned duplicate left over from a past rename. Grouped by
+ * id (never collapsed by name) so that distinct Drive objects that happen to
+ * share a `name` — including a stale duplicate sharing a name with a file
+ * that is still live and synced under a different id — are never confused
+ * with each other when deciding what actually gets moved to trash.
+ */
+export function unresolvedBaselineEntries(localIds: Map<string, string>, baseline: LocalSyncMeta, remote: SyncMeta): UnresolvedBaselineEntry[] {
+  const claimedIds = new Set(localIds.values());
+  return Object.entries(baseline.files)
+    .filter(([id]) => !claimedIds.has(id))
+    .map(([id, previous]) => ({ id, previous, currentRemote: remote.files[id] }));
+}
+
 export async function parallelForEach<T>(items: T[], worker: (item: T) => Promise<void>, concurrency = 5): Promise<void> {
   let next = 0;
   let failure: unknown;
@@ -141,7 +158,6 @@ export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMet
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
   const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [file.name, { id, file }]));
   const localIds = resolveLocalIds(inventory, baseline);
-  const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(path)!]));
   const localChanges: string[] = [], remoteChanges: string[] = [], localOnly: string[] = [], remoteOnly: string[] = [], localDeletes: string[] = [], remoteDeletes: string[] = [];
   const conflicts: ConflictInfo[] = [];
 
@@ -165,9 +181,7 @@ export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMet
     else if (remoteChanged) remoteChanges.push(currentRemote.name);
   }
 
-  for (const [id, previous] of Object.entries(baseline.files)) {
-    if (localById.has(id)) continue;
-    const currentRemote = remote.files[id];
+  for (const { id, previous, currentRemote } of unresolvedBaselineEntries(localIds, baseline, remote)) {
     if (!currentRemote) continue;
     const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
     if (remoteChanged) conflicts.push({ path: previous.name, id, remoteName: currentRemote.name, kind: "localDeleteRemoteEdit" }); else localDeletes.push(previous.name);
@@ -301,10 +315,19 @@ export class WorkspaceDriveSync {
       else { await createRemote(this.api, session.accessToken, session.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
     }
     if (status.localDeletes.length) {
+      // Resolve delete targets by id, not by looking `pathToId[name]` back up:
+      // when several Drive objects share a name (a stale duplicate left over
+      // from a past rename, alongside the file still live under a different
+      // id), a name-based lookup can resolve to the wrong — still current —
+      // id and move it to trash instead of the actual orphan.
       const trash = await ensureFolder(this.api, session.accessToken, session.rootFolderId, "trash");
-      for (const path of status.localDeletes) {
-        const id = baseline.pathToId[path];
-        if (id && remote.files[id] && !renamedIds.has(id)) { await moveRemote(this.api, session.accessToken, id, session.rootFolderId, trash); summary.deleted++; }
+      const localIds = resolveLocalIds(inventory, baseline);
+      for (const { id, previous, currentRemote } of unresolvedBaselineEntries(localIds, baseline, remote)) {
+        if (!currentRemote || renamedIds.has(id)) continue;
+        const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
+        if (remoteChanged) continue;
+        await moveRemote(this.api, session.accessToken, id, session.rootFolderId, trash);
+        summary.deleted++;
       }
     }
     const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
