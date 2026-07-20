@@ -1,9 +1,10 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
-import { createRemote, ensureFolder, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
+import { createRemote, ensureFolder, isUserExcludedPath, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
 import type { ConflictInfo, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
+export const EXCLUDE_PATTERNS_KEY = "excludePatterns";
 const TEXT_EXTENSIONS = new Set([
   "base", "c", "cc", "cfg", "conf", "cpp", "css", "csv", "dashboard",
   "go", "h", "hpp", "htm", "html", "ini", "java", "js", "json",
@@ -217,11 +218,22 @@ export class WorkspaceDriveSync {
     const value = await this.api.storage!.get(SNAPSHOT_KEY) as LocalSyncMeta | null;
     return value?.workspaceId === workspaceId ? value : emptySnapshot(workspaceId);
   }
-  private async inventory(): Promise<WorkspaceFile[]> { return (await (await this.workspaceFiles()).inventory()).filter((file) => syncablePath(file.path)); }
+  private async excludePatterns(): Promise<string[]> {
+    const value = await this.api.storage!.get(EXCLUDE_PATTERNS_KEY) as string[] | null;
+    return Array.isArray(value) ? value : [];
+  }
+  private async inventory(): Promise<WorkspaceFile[]> {
+    const patterns = await this.excludePatterns();
+    return (await (await this.workspaceFiles()).inventory()).filter((file) => syncablePath(file.path) && !isUserExcludedPath(file.path, patterns));
+  }
   private async state(): Promise<{ session: Session; inventory: WorkspaceFile[]; baseline: LocalSyncMeta; remote: SyncMeta; status: SyncStatus }> {
     const connection = await this.assertWorkspace();
     const session = await this.tokens();
-    const [inventory, baseline, remote] = await Promise.all([this.inventory(), this.snapshot(connection.workspace.id), readSyncMeta(this.api, session.accessToken, session.rootFolderId)]);
+    const [inventory, baseline, rawRemote, patterns] = await Promise.all([this.inventory(), this.snapshot(connection.workspace.id), readSyncMeta(this.api, session.accessToken, session.rootFolderId), this.excludePatterns()]);
+    // Excluded files are dropped from the working remote view so they are
+    // never proposed for pull/push, but the raw Drive listing (used when
+    // rewriting `_sync-meta.json`) still preserves their entries untouched.
+    const remote: SyncMeta = patterns.length ? { ...rawRemote, files: Object.fromEntries(Object.entries(rawRemote.files).filter(([, file]) => !isUserExcludedPath(file.name, patterns))) } : rawRemote;
     return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }

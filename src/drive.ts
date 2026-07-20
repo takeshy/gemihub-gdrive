@@ -22,6 +22,22 @@ export function syncablePath(path: string): boolean {
   return !!clean && !SYSTEM_NAMES.has(clean) && !SYSTEM_PREFIXES.some((prefix) => clean.startsWith(prefix)) && !clean.split("/").some((part) => part === ".git" || part === ".llm-hub" || part === "node_modules");
 }
 
+/** A trailing `/` excludes a folder and everything under it; otherwise the
+ * pattern is a glob (`*`/`?`) matched against the full path or its basename. */
+function matchesExcludePattern(path: string, pattern: string): boolean {
+  const trimmed = pattern.trim();
+  if (!trimmed) return false;
+  if (trimmed.endsWith("/")) return path === trimmed.slice(0, -1) || path.startsWith(trimmed);
+  const escaped = trimmed.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  const regex = new RegExp(`^${escaped}$`);
+  return regex.test(path) || regex.test(path.split("/").pop() ?? "");
+}
+
+export function isUserExcludedPath(path: string, patterns: string[]): boolean {
+  const clean = path.replace(/^\/+/, "");
+  return patterns.some((pattern) => matchesExcludePattern(clean, pattern));
+}
+
 async function driveRequest(api: PluginAPI, url: string, accessToken: string, options: { method?: string; headers?: Record<string, string>; body?: string | ArrayBuffer; contentType?: string } = {}, retries = 2): Promise<TransportResponse> {
   const response = await request(api, url, {
     method: options.method ?? "GET",

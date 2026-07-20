@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { conflictBackupName, metaFromFiles, writeSyncMeta, type DriveFile } from "./drive.ts";
+import { conflictBackupName, isUserExcludedPath, metaFromFiles, writeSyncMeta, type DriveFile } from "./drive.ts";
 import type { HTTPRequest, HTTPResponse, PluginAPI, SyncMeta } from "./types.ts";
 
 const rootFiles: DriveFile[] = [
@@ -43,6 +43,19 @@ Deno.test("conflict backups use GemiHub's flattened timestamped names", () => {
   const now = new Date("2026-07-19T01:02:03.000Z");
   assertEquals(conflictBackupName("notes/a.md", now), "notes_a_20260719_010203.md");
   assertEquals(conflictBackupName("README", now), "README_20260719_010203");
+});
+
+Deno.test("user exclude patterns support folder prefixes and glob wildcards", () => {
+  const patterns = ["drafts/", "*.tmp", "notes/secret-?.md"];
+  assertEquals(isUserExcludedPath("drafts/a.md", patterns), true);
+  assertEquals(isUserExcludedPath("drafts", patterns), true);
+  assertEquals(isUserExcludedPath("notes/drafts/a.md", patterns), false);
+  assertEquals(isUserExcludedPath("scratch.tmp", patterns), true);
+  assertEquals(isUserExcludedPath("nested/scratch.tmp", patterns), true);
+  assertEquals(isUserExcludedPath("notes/secret-1.md", patterns), true);
+  assertEquals(isUserExcludedPath("notes/secret-12.md", patterns), false);
+  assertEquals(isUserExcludedPath("notes/a.md", patterns), false);
+  assertEquals(isUserExcludedPath("notes/a.md", []), false);
 });
 
 Deno.test("writeSyncMeta keeps sharing state and Google Workspace entries", async () => {

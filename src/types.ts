@@ -17,6 +17,7 @@ export interface WorkspaceFilesAPI {
 export interface PluginAPI {
   language: string;
   registerView(view: { id: string; name: string; icon?: string; location: "sidebar" | "main"; component: (props: { api: PluginAPI }) => unknown }): void;
+  registerSettingsTab?(tab: { component: (props: { api: PluginAPI; onClose?: () => void }) => unknown }): void;
   workspaceFiles?: WorkspaceFilesAPI;
   storage?: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; getAll(): Promise<Record<string, unknown>> };
   network?: { request(request: HTTPRequest): Promise<HTTPResponse> };

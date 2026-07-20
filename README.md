@@ -11,6 +11,7 @@ GemiHub Desktopのactive Workspace全体を、GemiHubが利用するGoogle Drive
 - 1つのDesktop Workspaceを1つのGemiHub Driveルートへ固定して接続
 - Workspaceのファイルツリーに表示される通常ファイルを同期
 - `.git/`、`.llm-hub/`、`node_modules/`、GemiHub system files/foldersは除外
+- Pluginの設定画面から任意の除外パターンを追加設定可能（folder名末尾に`/`、`*`/`?`によるワイルドカードに対応。ローカル/Driveどちら側の対象ファイルも同期対象から外れる）
 - Google Docs、Sheets、Slidesなど`application/vnd.google-apps.*`のネイティブファイルは除外（PDF、DOCX、XLSXなど実体を持つexport済みファイルは同期）
 - text/binary、pathを含むflat Drive filename、renameに対応
 - Pullはlocalに未Pushの変更があっても実行可能（該当ファイルはスキップして保持）
