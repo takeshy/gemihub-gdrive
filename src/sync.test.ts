@@ -60,6 +60,29 @@ Deno.test("does not mistake a duplicate-content file for a deleted file rename",
   assertEquals(status.localChanges, []);
 });
 
+Deno.test("resolves a same-size group of duplicate-content renames without flagging false deletes", () => {
+  // Two files share identical content, both get renamed, then renamed back to
+  // their original names. The renamed (pushed) state is no longer a 1-to-1
+  // match, but the counts on each side still agree, so this must not be
+  // treated as "old files deleted, new files created".
+  const sameContentBaseline: LocalSyncMeta = {
+    workspaceId: "p", lastUpdatedAt: "",
+    files: { a: { name: "renamed-a.md", md5Checksum: "same" }, b: { name: "renamed-b.md", md5Checksum: "same" } },
+    pathToId: { "renamed-a.md": "a", "renamed-b.md": "b" },
+  };
+  const sameContentRemote: SyncMeta = {
+    lastUpdatedAt: "",
+    files: {
+      a: { name: "renamed-a.md", md5Checksum: "same", mimeType: "text/markdown", modifiedTime: "" },
+      b: { name: "renamed-b.md", md5Checksum: "same", mimeType: "text/markdown", modifiedTime: "" },
+    },
+  };
+  const status = computeStatus([local("a.md", "same"), local("b.md", "same")], sameContentBaseline, sameContentRemote);
+  assertEquals(status.localDeletes, []);
+  assertEquals(status.localOnly, []);
+  assertEquals(status.localChanges, ["a.md", "b.md"]);
+});
+
 Deno.test("treats rename-delete races as conflicts", () => {
   const localRenameRemoteDelete = computeStatus([local("renamed.md", "a")], baseline(), { lastUpdatedAt: "", files: {} });
   assertEquals(localRenameRemoteDelete.conflicts, [

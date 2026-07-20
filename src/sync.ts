@@ -47,9 +47,12 @@ function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): M
     if (id && baseline.files[id]) { resolved.set(local.path, id); claimedIds.add(id); }
   }
 
-  // A checksum-preserving rename is safe only when the remaining old and new
-  // paths form a one-to-one match. This avoids guessing between empty or
-  // duplicate-content files.
+  // A checksum-preserving rename is safe once the remaining old and new paths
+  // form a same-size group: with equal counts every id can be paired with a
+  // local file of identical content, so no delete+create churn is needed even
+  // though the exact pairing (which id gets which path) is arbitrary. A
+  // mismatched count is genuinely ambiguous (e.g. one of several duplicate-
+  // content files really was deleted) and is left unresolved.
   const oldByChecksum = new Map<string, string[]>();
   for (const [id, previous] of Object.entries(baseline.files)) {
     if (claimedIds.has(id) || inventory.some((file) => file.path === previous.name)) continue;
@@ -64,7 +67,10 @@ function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): M
   }
   for (const [checksum, ids] of oldByChecksum) {
     const locals = localByChecksum.get(checksum) ?? [];
-    if (ids.length === 1 && locals.length === 1) resolved.set(locals[0].path, ids[0]);
+    if (ids.length === 0 || ids.length !== locals.length) continue;
+    const sortedIds = [...ids].sort();
+    const sortedLocals = [...locals].sort((a, b) => a.path.localeCompare(b.path));
+    sortedIds.forEach((id, index) => resolved.set(sortedLocals[index].path, id));
   }
   return resolved;
 }
