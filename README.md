@@ -2,6 +2,10 @@
 
 GemiHub Desktopのactive Workspace全体を、GemiHubが利用するGoogle Driveルートと同期するPluginです。GemiHubと同じ`_sync-meta.json`、Migration Tool token、暗号化済みrefresh tokenを使用します。
 
+![GemiHub Google Drive Syncの同期前画面](before_sync.png)
+
+![Pull対象ファイルのプレビュー](pull.png)
+
 ## 動作
 
 - 1つのDesktop Workspaceを1つのGemiHub Driveルートへ固定して接続
