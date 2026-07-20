@@ -219,13 +219,13 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
         {previewBlockReason(status, preview) ? <p className="danger">{previewBlockReason(status, preview)}</p> : null}
         <div className="gdrive-preview-actions">
           <button type="button" className="secondary" disabled={busy} onClick={() => setPreview(null)}>Cancel</button>
-          <button type="button" disabled={busy || !!previewBlockReason(status, preview)} onClick={() => void run(preview === "push" ? push : pull)}>{preview === "push" ? "Push" : "Pull"}</button>
+          <button type="button" disabled={busy || !!previewBlockReason(status, preview)} onClick={() => void run(preview === "push" ? push : pull)}>{preview === "push" ? "Confirm push" : "Confirm pull"}</button>
         </div>
       </div> : null}
       <div className="gdrive-buttons">
-        <button type="button" disabled={busy} onClick={() => void run(refresh)}>Check</button>
-        <button type="button" disabled={busy} onClick={() => void run(() => prepare("pull"))}>Pull</button>
-        <button type="button" disabled={busy} onClick={() => void run(() => prepare("push"))}>Push</button>
+        <button type="button" disabled={busy || !!preview} onClick={() => void run(refresh)}>Check</button>
+        <button type="button" disabled={busy || !!preview} onClick={() => void run(() => prepare("pull"))}>Pull</button>
+        <button type="button" disabled={busy || !!preview} onClick={() => void run(() => prepare("push"))}>Push</button>
       </div>
       <small>GemiHubと同じ `_sync-meta.json` を使用します。初回に両側へ異なるファイルがある場合は Pull → Push の順で統合してください。</small>
     </div>}
