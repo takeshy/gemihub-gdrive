@@ -4,11 +4,25 @@ import type { ConflictInfo, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, 
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
-const TEXT_MIME = new Set(["application/json", "application/javascript", "application/xml", "application/x-yaml", "application/yaml", "image/svg+xml"]);
+const TEXT_EXTENSIONS = new Set([
+  "base", "c", "cc", "cfg", "conf", "cpp", "css", "csv", "dashboard",
+  "go", "h", "hpp", "htm", "html", "ini", "java", "js", "json",
+  "jsonl", "jsx", "kanban", "log", "markdown", "md", "mjs", "cjs",
+  "py", "rb", "rs", "sh", "sql", "svg", "toml", "ts", "tsx", "txt",
+  "workflow", "xml", "yaml", "yml", "audioscore",
+]);
+
+export function isTextPath(path: string): boolean {
+  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && TEXT_EXTENSIONS.has(name.slice(dot + 1));
+}
+
+export function isBinaryPath(path: string): boolean { return !isTextPath(path); }
 
 function mimeType(path: string): string {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
-  return ({ md: "text/markdown", markdown: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json", html: "text/html", css: "text/css", js: "application/javascript", ts: "text/typescript", xml: "application/xml", yaml: "application/x-yaml", yml: "application/x-yaml", base: "text/plain", kanban: "text/plain", dashboard: "text/plain", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", epub: "application/epub+zip" } as Record<string, string>)[extension] ?? "application/octet-stream";
+  return ({ md: "text/markdown", markdown: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json", html: "text/html", css: "text/css", js: "application/javascript", ts: "text/typescript", xml: "application/xml", yaml: "application/x-yaml", yml: "application/x-yaml", base: "text/plain", kanban: "text/plain", dashboard: "text/plain", audioscore: "application/json", svg: "image/svg+xml", mid: "audio/midi", midi: "audio/midi", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", epub: "application/epub+zip" } as Record<string, string>)[extension] ?? (isTextPath(path) ? "text/plain" : "application/octet-stream");
 }
 
 function decodeDataURL(value: string): ArrayBuffer {
@@ -19,7 +33,6 @@ function decodeDataURL(value: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function remoteIsBinary(mime: string): boolean { return !mime.startsWith("text/") && !TEXT_MIME.has(mime); }
 function emptySnapshot(workspaceId: string): LocalSyncMeta { return { workspaceId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
 
@@ -223,7 +236,7 @@ export class WorkspaceDriveSync {
 
     const local = inventory.find((file) => file.path === conflict.path);
     const remoteFile = remote.files[conflict.id];
-    const binary = Boolean(local?.binary || (remoteFile && remoteIsBinary(remoteFile.mimeType)));
+    const binary = Boolean(local?.binary || (remoteFile && isBinaryPath(remoteFile.name)));
     const preview: ConflictPreview = {
       binary,
       local: { exists: !!local, name: conflict.path, size: local?.size, md5: local?.md5 },
@@ -313,7 +326,7 @@ export class WorkspaceDriveSync {
         if (local?.md5 === file.md5Checksum) summary.skipped++;
         else {
           const content = await readRemote(this.api, session.accessToken, id);
-          const value = remoteIsBinary(file.mimeType) ? content.buffer : content.text;
+          const value = isBinaryPath(file.name) ? content.buffer : content.text;
           if (local) { await workspaceFiles.update(file.name, value); summary.updated++; }
           else { await workspaceFiles.create(file.name, value); summary.created++; }
         }
@@ -382,13 +395,13 @@ export class WorkspaceDriveSync {
           touchedRemote = true;
         } else {
           const content = await readRemote(this.api, session.accessToken, conflict.id);
-          await writeLocal(remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? content.buffer : content.text);
+          await writeLocal(remoteFile.name, isBinaryPath(remoteFile.name) ? content.buffer : content.text);
         }
       } else { // "edit" | "untracked": both sides exist
         if (!remoteFile) continue;
         if (choice === "local") {
           const backup = await readRemote(this.api, session.accessToken, conflict.id);
-          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? backup.buffer : backup.text, remoteFile.mimeType);
+          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, remoteFile.name, isBinaryPath(remoteFile.name) ? backup.buffer : backup.text, remoteFile.mimeType);
           if (remoteFile.name !== conflict.path) await renameRemote(this.api, session.accessToken, conflict.id, conflict.path);
           await updateRemote(this.api, session.accessToken, conflict.id, await readLocal(conflict.path), mimeType(conflict.path));
           touchedRemote = true;
@@ -396,7 +409,7 @@ export class WorkspaceDriveSync {
           await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
           const content = await readRemote(this.api, session.accessToken, conflict.id);
           if (remoteFile.name !== conflict.path) await files.delete(conflict.path);
-          await writeLocal(remoteFile.name, remoteIsBinary(remoteFile.mimeType) ? content.buffer : content.text);
+          await writeLocal(remoteFile.name, isBinaryPath(remoteFile.name) ? content.buffer : content.text);
         }
       }
       resolved++;

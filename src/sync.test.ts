@@ -1,12 +1,23 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeSnapshot, computeStatus, parallelForEach, planPush } from "./sync.ts";
+import { computeSnapshot, computeStatus, isBinaryPath, isTextPath, parallelForEach, planPush } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
 const local = (path: string, md5: string): WorkspaceFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
 const baseline = (md5 = "a"): LocalSyncMeta => ({ workspaceId: "p", lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5 } }, pathToId: { "notes/a.md": "id" } });
 const remote = (md5 = "a"): SyncMeta => ({ lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5, mimeType: "text/markdown", modifiedTime: "" } } });
+
+Deno.test("classifies only known text extensions as text", () => {
+  for (const path of ["notes/readme.md", "data/view.yaml", "boards/work.dashboard", "scores/song.audioscore", "src/main.tsx", "image.svg"]) {
+    assertEquals(isTextPath(path), true, path);
+    assertEquals(isBinaryPath(path), false, path);
+  }
+  for (const path of ["scores/song.mid", "scores/song.midi", "docs/file.pdf", "audio/track.wav", "unknown", "archive.custom"]) {
+    assertEquals(isTextPath(path), false, path);
+    assertEquals(isBinaryPath(path), true, path);
+  }
+});
 
 Deno.test("classifies local, remote, delete, and conflict changes", () => {
   assertEquals(computeStatus([local("notes/a.md", "b")], baseline(), remote()).localChanges, ["notes/a.md"]);
