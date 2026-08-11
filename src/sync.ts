@@ -36,11 +36,17 @@ function decodeDataURL(value: string): ArrayBuffer {
 
 function emptySnapshot(workspaceId: string): LocalSyncMeta { return { workspaceId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
+function pathKey(path: string, caseInsensitive = false): string { return caseInsensitive ? path.toLowerCase() : path; }
+function isWindowsWorkspace(workspace: Workspace): boolean { return /^[a-z]:[\\/]/i.test(workspace.path) || workspace.path.startsWith("\\\\"); }
 
-export function duplicateRemotePaths(remote: SyncMeta): string[] {
-  const counts = new Map<string, number>();
-  for (const file of Object.values(remote.files)) counts.set(file.name, (counts.get(file.name) ?? 0) + 1);
-  return [...counts].filter(([, count]) => count > 1).map(([path]) => path).sort((a, b) => a.localeCompare(b));
+export function duplicateRemotePaths(remote: SyncMeta, caseInsensitive = false): string[] {
+  const groups = new Map<string, string[]>();
+  for (const file of Object.values(remote.files)) {
+    const key = pathKey(file.name, caseInsensitive);
+    const names = groups.get(key) ?? [];
+    names.push(file.name); groups.set(key, names);
+  }
+  return [...groups.values()].filter((names) => names.length > 1).map((names) => names[0]).sort((a, b) => a.localeCompare(b));
 }
 
 export function remoteSnapshotChanged(expected: SyncMeta, current: SyncMeta): boolean {
@@ -55,13 +61,14 @@ export function remoteSnapshotChanged(expected: SyncMeta, current: SyncMeta): bo
   });
 }
 
-function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): Map<string, string> {
+function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta, caseInsensitive = false): Map<string, string> {
   const resolved = new Map<string, string>();
   const claimedIds = new Set<string>();
+  const baselinePaths = new Map(Object.entries(baseline.pathToId).map(([path, id]) => [pathKey(path, caseInsensitive), id]));
 
   // Exact paths are unambiguous, even when several files have the same checksum.
   for (const local of inventory) {
-    const id = baseline.pathToId[local.path];
+    const id = baselinePaths.get(pathKey(local.path, caseInsensitive));
     if (id && baseline.files[id]) { resolved.set(local.path, id); claimedIds.add(id); }
   }
 
@@ -73,7 +80,7 @@ function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): M
   // content files really was deleted) and is left unresolved.
   const oldByChecksum = new Map<string, string[]>();
   for (const [id, previous] of Object.entries(baseline.files)) {
-    if (claimedIds.has(id) || inventory.some((file) => file.path === previous.name)) continue;
+    if (claimedIds.has(id) || inventory.some((file) => pathKey(file.path, caseInsensitive) === pathKey(previous.name, caseInsensitive))) continue;
     const ids = oldByChecksum.get(previous.md5Checksum) ?? [];
     ids.push(id); oldByChecksum.set(previous.md5Checksum, ids);
   }
@@ -131,14 +138,14 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
  * so pending local edits, renames, deletes, and unresolved conflicts survive a
  * pull or a partial conflict resolution.
  */
-export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): LocalSyncMeta {
-  const localByPath = new Map(inventory.map((file) => [file.path, file]));
-  const localIds = resolveLocalIds(inventory, baseline);
-  const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(path)!]));
-  const liveRemotePaths = new Set(Object.values(remote.files).map((file) => file.name));
+export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta, caseInsensitive = false): LocalSyncMeta {
+  const localByPath = new Map(inventory.map((file) => [pathKey(file.path, caseInsensitive), file]));
+  const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
+  const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(pathKey(path, caseInsensitive))!]));
+  const liveRemotePaths = new Set(Object.values(remote.files).map((file) => pathKey(file.name, caseInsensitive)));
   const files: LocalSyncMeta["files"] = {}, pathToId: Record<string, string> = {};
   for (const [id, file] of Object.entries(remote.files)) {
-    const local = localByPath.get(file.name);
+    const local = localByPath.get(pathKey(file.name, caseInsensitive));
     const previous = baseline.files[id];
     let entry: LocalSyncMeta["files"][string] | undefined;
     if (local && (!file.md5Checksum || local.md5 === file.md5Checksum)) entry = { name: file.name, md5Checksum: file.md5Checksum || local.md5 };
@@ -156,7 +163,7 @@ export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory
   for (const [id, previous] of Object.entries(baseline.files)) {
     if (remote.files[id]) continue;
     const local = localById.get(id);
-    if (!local || liveRemotePaths.has(local.path)) continue;
+    if (!local || liveRemotePaths.has(pathKey(local.path, caseInsensitive))) continue;
     files[id] = previous;
     pathToId[local.path] = id;
   }
@@ -171,44 +178,44 @@ export interface ConflictPreview {
   remote: { exists: boolean; name: string; size?: number; md5?: string; text?: string };
 }
 
-export function planPush(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta): PushAction[] {
-  const localIds = resolveLocalIds(inventory, baseline);
+export function planPush(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta, caseInsensitive = false): PushAction[] {
+  const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
   return inventory.map((local) => {
     let id = localIds.get(local.path);
     if (!id) {
-      const sameRemote = Object.entries(remote.files).filter(([, file]) => file.name === local.path && file.md5Checksum === local.md5);
+      const sameRemote = Object.entries(remote.files).filter(([, file]) => pathKey(file.name, caseInsensitive) === pathKey(local.path, caseInsensitive) && file.md5Checksum === local.md5);
       if (sameRemote.length === 1) id = sameRemote[0][0];
     }
     // For untracked files adopted through a name+checksum match the remote file
     // itself is the last known state; comparing against the (empty) baseline
     // would re-upload and re-name identical content on the first push.
     const known = id ? baseline.files[id] ?? remote.files[id] : undefined;
-    const rename = !!id && !!remote.files[id] && !!known && known.name !== local.path;
+    const rename = !!id && !!remote.files[id] && !!known && pathKey(known.name, caseInsensitive) !== pathKey(local.path, caseInsensitive);
     const upload: PushAction["upload"] = id && known && known.md5Checksum === local.md5 ? null : id && remote.files[id] ? "update" : "create";
     return { local, id, rename, upload };
   });
 }
 
-export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta): SyncStatus {
-  const localByPath = new Map(inventory.map((file) => [file.path, file]));
-  const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [file.name, { id, file }]));
-  const localIds = resolveLocalIds(inventory, baseline);
+export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMeta, remote: SyncMeta, caseInsensitive = false): SyncStatus {
+  const localByPath = new Map(inventory.map((file) => [pathKey(file.path, caseInsensitive), file]));
+  const remoteByName = new Map(Object.entries(remote.files).map(([id, file]) => [pathKey(file.name, caseInsensitive), { id, file }]));
+  const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
   const localChanges: string[] = [], remoteChanges: string[] = [], localOnly: string[] = [], remoteOnly: string[] = [], localDeletes: string[] = [], remoteDeletes: string[] = [];
   const conflicts: ConflictInfo[] = [];
 
   for (const local of inventory) {
     const id = localIds.get(local.path);
     if (!id) {
-      const samePath = remoteByName.get(local.path);
+      const samePath = remoteByName.get(pathKey(local.path, caseInsensitive));
       if (!samePath) localOnly.push(local.path);
       else if (samePath.file.md5Checksum !== local.md5) conflicts.push({ path: local.path, id: samePath.id, remoteName: samePath.file.name, kind: "untracked" });
       continue;
     }
     const previous = baseline.files[id];
     const currentRemote = remote.files[id];
-    if (currentRemote && currentRemote.md5Checksum === local.md5 && currentRemote.name === local.path) continue;
-    const localChanged = !previous || previous.md5Checksum !== local.md5 || previous.name !== local.path;
-    const remoteChanged = !!previous && !!currentRemote && (previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name);
+    if (currentRemote && currentRemote.md5Checksum === local.md5 && pathKey(currentRemote.name, caseInsensitive) === pathKey(local.path, caseInsensitive)) continue;
+    const localChanged = !previous || previous.md5Checksum !== local.md5 || pathKey(previous.name, caseInsensitive) !== pathKey(local.path, caseInsensitive);
+    const remoteChanged = !!previous && !!currentRemote && (previous.md5Checksum !== currentRemote.md5Checksum || pathKey(previous.name, caseInsensitive) !== pathKey(currentRemote.name, caseInsensitive));
     if (!currentRemote) {
       if (localChanged) conflicts.push({ path: local.path, id, remoteName: null, kind: "localEditRemoteDelete" }); else remoteDeletes.push(previous.name);
     } else if (localChanged && remoteChanged) conflicts.push({ path: local.path, id, remoteName: currentRemote.name, kind: "edit" });
@@ -222,7 +229,7 @@ export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMet
     if (remoteChanged) conflicts.push({ path: previous.name, id, remoteName: currentRemote.name, kind: "localDeleteRemoteEdit" }); else localDeletes.push(previous.name);
   }
   for (const [id, file] of Object.entries(remote.files)) {
-    if (!baseline.files[id] && !localByPath.has(file.name)) remoteOnly.push(file.name);
+    if (!baseline.files[id] && !localByPath.has(pathKey(file.name, caseInsensitive))) remoteOnly.push(file.name);
   }
   return { localChanges: sorted(localChanges), remoteChanges: sorted(remoteChanges), localOnly: sorted(localOnly), remoteOnly: sorted(remoteOnly), localDeletes: sorted(localDeletes), remoteDeletes: sorted(remoteDeletes), conflicts: conflicts.sort((a, b) => a.path.localeCompare(b.path)) };
 }
@@ -293,9 +300,10 @@ export class WorkspaceDriveSync {
     // never proposed for pull/push, but the raw Drive listing (used when
     // rewriting `_sync-meta.json`) still preserves their entries untouched.
     const remote: SyncMeta = patterns.length ? { ...rawRemote, files: Object.fromEntries(Object.entries(rawRemote.files).filter(([, file]) => !isUserExcludedPath(file.name, patterns))) } : rawRemote;
-    const duplicates = duplicateRemotePaths(remote);
+    const caseInsensitive = isWindowsWorkspace(connection.workspace);
+    const duplicates = duplicateRemotePaths(remote, caseInsensitive);
     if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
-    return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote) };
+    return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote, caseInsensitive) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
 
@@ -327,8 +335,8 @@ export class WorkspaceDriveSync {
     return preview;
   }
 
-  private async saveSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): Promise<void> {
-    await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(workspaceId, remote, inventory, baseline));
+  private async saveSnapshot(workspace: Workspace, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): Promise<void> {
+    await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(workspace.id, remote, inventory, baseline, isWindowsWorkspace(workspace)));
   }
 
   async push(allowDeletes = false): Promise<SyncSummary> {
@@ -345,13 +353,14 @@ export class WorkspaceDriveSync {
     const latestFiles = (await listRootFiles(this.api, session.accessToken, session.rootFolderId))
       .filter((file) => !isUserExcludedPath(file.name, patterns));
     const latestRemote = metaFromFiles(latestFiles);
-    const duplicates = duplicateRemotePaths(latestRemote);
+    const caseInsensitive = isWindowsWorkspace(connection.workspace);
+    const duplicates = duplicateRemotePaths(latestRemote, caseInsensitive);
     if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
     if (remoteSnapshotChanged(remote, latestRemote)) throw new Error("Google Drive changed after the sync check. Run Check again before pushing.");
 
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const renamedIds = new Set<string>();
-    for (const action of planPush(inventory, baseline, remote)) {
+    for (const action of planPush(inventory, baseline, remote, caseInsensitive)) {
       const activeSession = await this.tokens();
       const { local, id } = action;
       if (action.rename && id) {
@@ -375,7 +384,7 @@ export class WorkspaceDriveSync {
       // id and move it to trash instead of the actual orphan.
       const deleteSession = await this.tokens();
       const trash = await ensureFolder(this.api, deleteSession.accessToken, deleteSession.rootFolderId, "trash");
-      const localIds = resolveLocalIds(inventory, baseline);
+      const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
       for (const { id, previous, currentRemote } of unresolvedBaselineEntries(localIds, baseline, remote)) {
         if (!currentRemote || renamedIds.has(id)) continue;
         const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
@@ -388,7 +397,7 @@ export class WorkspaceDriveSync {
     const finalSession = await this.tokens();
     const nextRemote = metaFromFiles(await listRootFiles(this.api, finalSession.accessToken, finalSession.rootFolderId));
     const writtenRemote = await writeSyncMeta(this.api, finalSession.accessToken, finalSession.rootFolderId, nextRemote);
-    await this.saveSnapshot(connection.workspace.id, writtenRemote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace, writtenRemote, await this.inventory(), baseline);
     return summary;
   }
 
@@ -399,7 +408,8 @@ export class WorkspaceDriveSync {
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteDeletes.length && !allowDeletes) throw new Error(`Pull will delete ${status.remoteDeletes.length} local file(s). Confirm deletion first.`);
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
-    const localByPath = new Map(inventory.map((file) => [file.path, file]));
+    const caseInsensitive = isWindowsWorkspace(connection.workspace);
+    const localByPath = new Map(inventory.map((file) => [pathKey(file.path, caseInsensitive), file]));
     const files = Object.entries(remote.files);
     let completed = 0;
     onProgress?.({ phase: "pull", completed, total: files.length });
@@ -415,10 +425,10 @@ export class WorkspaceDriveSync {
           onProgress?.({ phase: "pull", completed, total: files.length, path: file.name });
           return;
         }
-        let local = localByPath.get(file.name);
-        if (previous && previous.name !== file.name && localByPath.has(previous.name) && !local) {
+        let local = localByPath.get(pathKey(file.name, caseInsensitive));
+        if (previous && pathKey(previous.name, caseInsensitive) !== pathKey(file.name, caseInsensitive) && localByPath.has(pathKey(previous.name, caseInsensitive)) && !local) {
           await workspaceFiles.rename(previous.name, file.name); summary.renamed++;
-          local = localByPath.get(previous.name);
+          local = localByPath.get(pathKey(previous.name, caseInsensitive));
         }
         if (local?.md5 === file.md5Checksum) summary.skipped++;
         else {
@@ -444,7 +454,7 @@ export class WorkspaceDriveSync {
       }
     }
     onProgress?.({ phase: "snapshot", completed: 0, total: 1 });
-    await this.saveSnapshot(connection.workspace.id, remote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace, remote, await this.inventory(), baseline);
     onProgress?.({ phase: "snapshot", completed: 1, total: 1 });
     return summary;
   }
@@ -518,7 +528,7 @@ export class WorkspaceDriveSync {
       const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
       finalRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
     }
-    await this.saveSnapshot(connection.workspace.id, finalRemote, await this.inventory(), baseline);
+    await this.saveSnapshot(connection.workspace, finalRemote, await this.inventory(), baseline);
     return resolved;
   }
 }

@@ -235,6 +235,38 @@ Deno.test("detects duplicate Drive paths before pull or push writes", () => {
   assertEquals(duplicateRemotePaths(duplicates), ["same.md"]);
 });
 
+Deno.test("detects case-distinct Drive paths as duplicates on Windows", () => {
+  const duplicates: SyncMeta = {
+    lastUpdatedAt: "",
+    files: {
+      upper: { name: "Tasks/a.md", md5Checksum: "a", mimeType: "text/markdown", modifiedTime: "" },
+      lower: { name: "tasks/a.md", md5Checksum: "b", mimeType: "text/markdown", modifiedTime: "" },
+    },
+  };
+  assertEquals(duplicateRemotePaths(duplicates), []);
+  assertEquals(duplicateRemotePaths(duplicates, true), ["Tasks/a.md"]);
+});
+
+Deno.test("case-only path differences are unchanged on Windows", () => {
+  const windowsBaseline: LocalSyncMeta = {
+    workspaceId: "p", lastUpdatedAt: "",
+    files: { id: { name: "Tasks/a.md", md5Checksum: "a" } },
+    pathToId: { "Tasks/a.md": "id" },
+  };
+  const windowsRemote: SyncMeta = {
+    lastUpdatedAt: "",
+    files: { id: { name: "Tasks/a.md", md5Checksum: "a", mimeType: "text/markdown", modifiedTime: "" } },
+  };
+  const inventory = [local("tasks/a.md", "a")];
+  assertEquals(computeStatus(inventory, windowsBaseline, windowsRemote, true), {
+    localChanges: [], remoteChanges: [], localOnly: [], remoteOnly: [], localDeletes: [], remoteDeletes: [], conflicts: [],
+  });
+  assertEquals(planPush(inventory, windowsBaseline, windowsRemote, true), [
+    { local: inventory[0], id: "id", rename: false, upload: null },
+  ]);
+  assertEquals(computeSnapshot("p", windowsRemote, inventory, windowsBaseline, true).pathToId, { "Tasks/a.md": "id" });
+});
+
 Deno.test("detects a changed Drive batch snapshot", () => {
   assertEquals(remoteSnapshotChanged(remote(), remote()), false);
   assertEquals(remoteSnapshotChanged(remote(), remote("changed")), true);
