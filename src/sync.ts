@@ -133,6 +133,9 @@ export async function parallelForEach<T>(items: T[], worker: (item: T) => Promis
  */
 export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): LocalSyncMeta {
   const localByPath = new Map(inventory.map((file) => [file.path, file]));
+  const localIds = resolveLocalIds(inventory, baseline);
+  const localById = new Map([...localIds].map(([path, id]) => [id, localByPath.get(path)!]));
+  const liveRemotePaths = new Set(Object.values(remote.files).map((file) => file.name));
   const files: LocalSyncMeta["files"] = {}, pathToId: Record<string, string> = {};
   for (const [id, file] of Object.entries(remote.files)) {
     const local = localByPath.get(file.name);
@@ -142,6 +145,20 @@ export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory
     else if (previous) entry = previous;
     if (!entry) continue;
     files[id] = entry; pathToId[entry.name] = id;
+  }
+
+  // Keep the last synchronized identity for files deleted on Drive while the
+  // corresponding local file still exists. Dropping it here turns an
+  // unresolved remote deletion into an untracked local file, so the next
+  // status check incorrectly offers it as a normal create-on-push action.
+  // A live remote file at the same path means conflict resolution already
+  // recreated/replaced the old ID; in that case the stale ID must disappear.
+  for (const [id, previous] of Object.entries(baseline.files)) {
+    if (remote.files[id]) continue;
+    const local = localById.get(id);
+    if (!local || liveRemotePaths.has(local.path)) continue;
+    files[id] = previous;
+    pathToId[local.path] = id;
   }
   return { workspaceId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId };
 }

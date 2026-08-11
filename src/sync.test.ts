@@ -146,6 +146,36 @@ Deno.test("recognizes already-applied remote state after an interrupted pull", (
   assertEquals(status.remoteChanges, []);
 });
 
+Deno.test("snapshot preserves an unresolved remote deletion", () => {
+  const snapshot = computeSnapshot("p", { lastUpdatedAt: "remote", files: {} }, [local("notes/a.md", "a")], baseline());
+  assertEquals(snapshot.files, baseline().files);
+  assertEquals(snapshot.pathToId, { "notes/a.md": "id" });
+  assertEquals(computeStatus([local("notes/a.md", "a")], snapshot, { lastUpdatedAt: "", files: {} }).remoteDeletes, ["notes/a.md"]);
+});
+
+Deno.test("snapshot preserves an unresolved edit-delete conflict", () => {
+  const snapshot = computeSnapshot("p", { lastUpdatedAt: "remote", files: {} }, [local("notes/a.md", "b")], baseline());
+  assertEquals(computeStatus([local("notes/a.md", "b")], snapshot, { lastUpdatedAt: "", files: {} }).conflicts, [
+    { path: "notes/a.md", id: "id", remoteName: null, kind: "localEditRemoteDelete" },
+  ]);
+});
+
+Deno.test("snapshot drops a remote deletion after its local file is removed", () => {
+  const snapshot = computeSnapshot("p", { lastUpdatedAt: "remote", files: {} }, [], baseline());
+  assertEquals(snapshot.files, {});
+  assertEquals(snapshot.pathToId, {});
+});
+
+Deno.test("snapshot replaces a deleted ID after keep-local recreates the remote file", () => {
+  const recreated: SyncMeta = {
+    lastUpdatedAt: "remote",
+    files: { replacement: { name: "notes/a.md", md5Checksum: "b", mimeType: "text/markdown", modifiedTime: "" } },
+  };
+  const snapshot = computeSnapshot("p", recreated, [local("notes/a.md", "b")], baseline());
+  assertEquals(snapshot.files, { replacement: { name: "notes/a.md", md5Checksum: "b" } });
+  assertEquals(snapshot.pathToId, { "notes/a.md": "replacement" });
+});
+
 Deno.test("push adopts identical untracked files without re-upload or rename", () => {
   const empty: LocalSyncMeta = { workspaceId: "p", lastUpdatedAt: "", files: {}, pathToId: {} };
   assertEquals(planPush([local("notes/a.md", "a")], empty, remote()), [
