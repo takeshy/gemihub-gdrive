@@ -37,6 +37,24 @@ function decodeDataURL(value: string): ArrayBuffer {
 function emptySnapshot(workspaceId: string): LocalSyncMeta { return { workspaceId, lastUpdatedAt: "", files: {}, pathToId: {} }; }
 function sorted(values: Iterable<string>): string[] { return [...new Set(values)].sort((a, b) => a.localeCompare(b)); }
 
+export function duplicateRemotePaths(remote: SyncMeta): string[] {
+  const counts = new Map<string, number>();
+  for (const file of Object.values(remote.files)) counts.set(file.name, (counts.get(file.name) ?? 0) + 1);
+  return [...counts].filter(([, count]) => count > 1).map(([path]) => path).sort((a, b) => a.localeCompare(b));
+}
+
+export function remoteSnapshotChanged(expected: SyncMeta, current: SyncMeta): boolean {
+  const expectedIds = Object.keys(expected.files).sort();
+  const currentIds = Object.keys(current.files).sort();
+  if (expectedIds.length !== currentIds.length || expectedIds.some((id, index) => id !== currentIds[index])) return true;
+  return expectedIds.some((id) => {
+    const before = expected.files[id], after = current.files[id];
+    if (before.name !== after.name) return true;
+    if (before.md5Checksum && after.md5Checksum) return before.md5Checksum !== after.md5Checksum;
+    return before.modifiedTime !== after.modifiedTime;
+  });
+}
+
 function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta): Map<string, string> {
   const resolved = new Map<string, string>();
   const claimedIds = new Set<string>();
@@ -194,6 +212,7 @@ export function computeStatus(inventory: WorkspaceFile[], baseline: LocalSyncMet
 
 export class WorkspaceDriveSync {
   private session: Session | null = null;
+  private sessionRefresh: Promise<Session> | null = null;
   constructor(private api: PluginAPI) {
     if (!api.workspaceFiles || !api.storage || !api.network) throw new Error("This plugin requires Workspace files, storage, and network APIs from GemiHub Desktop.");
   }
@@ -211,7 +230,7 @@ export class WorkspaceDriveSync {
     await this.api.storage!.set(SNAPSHOT_KEY, null);
     return connection;
   }
-  async reset(): Promise<void> { this.session = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
+  async reset(): Promise<void> { this.session = null; this.sessionRefresh = null; await this.api.storage!.set(CONNECTION_KEY, null); await this.api.storage!.set(SNAPSHOT_KEY, null); }
   async unlock(password: string): Promise<void> {
     const connection = await this.connection();
     if (!connection) throw new Error("Google Drive is not connected.");
@@ -231,7 +250,10 @@ export class WorkspaceDriveSync {
   private async tokens(): Promise<Session> {
     await this.assertWorkspace();
     if (!this.session) throw new Error("Unlock the connection first.");
-    this.session = await refreshSession(this.api, this.session);
+    if (!this.sessionRefresh) {
+      this.sessionRefresh = refreshSession(this.api, this.session).finally(() => { this.sessionRefresh = null; });
+    }
+    this.session = await this.sessionRefresh;
     return this.session;
   }
   private async snapshot(workspaceId: string): Promise<LocalSyncMeta> {
@@ -254,6 +276,8 @@ export class WorkspaceDriveSync {
     // never proposed for pull/push, but the raw Drive listing (used when
     // rewriting `_sync-meta.json`) still preserves their entries untouched.
     const remote: SyncMeta = patterns.length ? { ...rawRemote, files: Object.fromEntries(Object.entries(rawRemote.files).filter(([, file]) => !isUserExcludedPath(file.name, patterns))) } : rawRemote;
+    const duplicates = duplicateRemotePaths(remote);
+    if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
     return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
@@ -297,12 +321,24 @@ export class WorkspaceDriveSync {
     if (status.conflicts.length) throw new Error(`Resolve conflicts first: ${status.conflicts.map((conflict) => conflict.path).join(", ")}`);
     if (status.remoteChanges.length || status.remoteOnly.length || status.remoteDeletes.length) throw new Error("Google Drive has pending changes. Pull before pushing.");
     if (status.localDeletes.length && !allowDeletes) throw new Error(`Push will move ${status.localDeletes.length} remote file(s) to GemiHub trash. Confirm deletion first.`);
+
+    // Re-list Drive once immediately before applying the batch. This catches
+    // edits/deletes/moves made after state() without adding one request per file.
+    const patterns = await this.excludePatterns();
+    const latestFiles = (await listRootFiles(this.api, session.accessToken, session.rootFolderId))
+      .filter((file) => !isUserExcludedPath(file.name, patterns));
+    const latestRemote = metaFromFiles(latestFiles);
+    const duplicates = duplicateRemotePaths(latestRemote);
+    if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
+    if (remoteSnapshotChanged(remote, latestRemote)) throw new Error("Google Drive changed after the sync check. Run Check again before pushing.");
+
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const renamedIds = new Set<string>();
     for (const action of planPush(inventory, baseline, remote)) {
+      const activeSession = await this.tokens();
       const { local, id } = action;
       if (action.rename && id) {
-        await renameRemote(this.api, session.accessToken, id, local.path);
+        await renameRemote(this.api, activeSession.accessToken, id, local.path);
         renamedIds.add(id); summary.renamed++;
       }
       if (!action.upload) {
@@ -311,8 +347,8 @@ export class WorkspaceDriveSync {
       }
       const raw = await files.read(local.path);
       const content = local.binary ? decodeDataURL(raw) : raw;
-      if (action.upload === "update" && id) { await updateRemote(this.api, session.accessToken, id, content, mimeType(local.path)); summary.updated++; }
-      else { await createRemote(this.api, session.accessToken, session.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
+      if (action.upload === "update" && id) { await updateRemote(this.api, activeSession.accessToken, id, content, mimeType(local.path)); summary.updated++; }
+      else { await createRemote(this.api, activeSession.accessToken, activeSession.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
     }
     if (status.localDeletes.length) {
       // Resolve delete targets by id, not by looking `pathToId[name]` back up:
@@ -320,18 +356,21 @@ export class WorkspaceDriveSync {
       // from a past rename, alongside the file still live under a different
       // id), a name-based lookup can resolve to the wrong — still current —
       // id and move it to trash instead of the actual orphan.
-      const trash = await ensureFolder(this.api, session.accessToken, session.rootFolderId, "trash");
+      const deleteSession = await this.tokens();
+      const trash = await ensureFolder(this.api, deleteSession.accessToken, deleteSession.rootFolderId, "trash");
       const localIds = resolveLocalIds(inventory, baseline);
       for (const { id, previous, currentRemote } of unresolvedBaselineEntries(localIds, baseline, remote)) {
         if (!currentRemote || renamedIds.has(id)) continue;
         const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
         if (remoteChanged) continue;
-        await moveRemote(this.api, session.accessToken, id, session.rootFolderId, trash);
+        const activeSession = await this.tokens();
+        await moveRemote(this.api, activeSession.accessToken, id, activeSession.rootFolderId, trash);
         summary.deleted++;
       }
     }
-    const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
-    const writtenRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
+    const finalSession = await this.tokens();
+    const nextRemote = metaFromFiles(await listRootFiles(this.api, finalSession.accessToken, finalSession.rootFolderId));
+    const writtenRemote = await writeSyncMeta(this.api, finalSession.accessToken, finalSession.rootFolderId, nextRemote);
     await this.saveSnapshot(connection.workspace.id, writtenRemote, await this.inventory(), baseline);
     return summary;
   }
@@ -366,7 +405,8 @@ export class WorkspaceDriveSync {
         }
         if (local?.md5 === file.md5Checksum) summary.skipped++;
         else {
-          const content = await readRemote(this.api, session.accessToken, id);
+          const activeSession = await this.tokens();
+          const content = await readRemote(this.api, activeSession.accessToken, id);
           const value = isBinaryPath(file.name) ? content.buffer : content.text;
           if (local) { await workspaceFiles.update(file.name, value); summary.updated++; }
           else { await workspaceFiles.create(file.name, value); summary.created++; }

@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeSnapshot, computeStatus, isBinaryPath, isTextPath, parallelForEach, planPush, unresolvedBaselineEntries } from "./sync.ts";
+import { computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
@@ -191,6 +191,24 @@ Deno.test("reconciles stale sync metadata against the live Drive listing", () =>
   assertEquals(Object.keys(reconciled.files).sort(), ["created", "kept"]);
   assertEquals(reconciled.files.kept.md5Checksum, "current");
   assertEquals(reconciled.files.kept.size, "12");
+});
+
+Deno.test("detects duplicate Drive paths before pull or push writes", () => {
+  const duplicates: SyncMeta = {
+    lastUpdatedAt: "",
+    files: {
+      a: { name: "same.md", md5Checksum: "a", mimeType: "text/markdown", modifiedTime: "1" },
+      b: { name: "same.md", md5Checksum: "b", mimeType: "text/markdown", modifiedTime: "2" },
+      c: { name: "unique.md", md5Checksum: "c", mimeType: "text/markdown", modifiedTime: "3" },
+    },
+  };
+  assertEquals(duplicateRemotePaths(duplicates), ["same.md"]);
+});
+
+Deno.test("detects a changed Drive batch snapshot", () => {
+  assertEquals(remoteSnapshotChanged(remote(), remote()), false);
+  assertEquals(remoteSnapshotChanged(remote(), remote("changed")), true);
+  assertEquals(remoteSnapshotChanged(remote(), { lastUpdatedAt: "", files: {} }), true);
 });
 
 Deno.test("snapshot keeps pending local edits, deletes, and unresolved conflicts", () => {
