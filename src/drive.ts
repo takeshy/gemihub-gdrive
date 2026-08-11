@@ -4,7 +4,7 @@ import type { FileSyncMeta, PluginAPI, SyncMeta } from "./types";
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const SYSTEM_NAMES = new Set(["_sync-meta.json", "_encrypted-auth.json", "settings.json"]);
-export const SYSTEM_PREFIXES = ["history/", "trash/", "sync_conflicts/", "__TEMP__/", "plugins/"];
+export const SYSTEM_PREFIXES = ["history/", "trash/", "sync_conflicts/", "GemiHub/conflict-backups/", "__TEMP__/", "plugins/"];
 
 export interface DriveFile { id: string; name: string; mimeType: string; modifiedTime?: string; createdTime?: string; parents?: string[]; md5Checksum?: string; size?: string }
 
@@ -124,7 +124,7 @@ export async function ensureFolder(api: PluginAPI, accessToken: string, rootFold
 /** Same naming scheme as GemiHub's saveConflictBackup: path separators become
  * underscores and a timestamp is inserted before the extension. */
 export function conflictBackupName(path: string, now = new Date()): string {
-  const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "_").replace("Z", "").replace(".", "_");
   const safe = path.replace(/\//g, "_");
   const dot = safe.lastIndexOf(".");
   return dot > 0 ? `${safe.slice(0, dot)}_${timestamp}${safe.slice(dot)}` : `${safe}_${timestamp}`;

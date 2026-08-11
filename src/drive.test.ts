@@ -41,8 +41,8 @@ function driveMock(): { api: PluginAPI; writes: string[] } {
 
 Deno.test("conflict backups use GemiHub's flattened timestamped names", () => {
   const now = new Date("2026-07-19T01:02:03.000Z");
-  assertEquals(conflictBackupName("notes/a.md", now), "notes_a_20260719_010203.md");
-  assertEquals(conflictBackupName("README", now), "README_20260719_010203");
+  assertEquals(conflictBackupName("notes/a.md", now), "notes_a_20260719_010203_000.md");
+  assertEquals(conflictBackupName("README", now), "README_20260719_010203_000");
 });
 
 Deno.test("user exclude patterns support folder prefixes and glob wildcards", () => {

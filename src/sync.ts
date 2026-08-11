@@ -1,5 +1,5 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
-import { createRemote, ensureFolder, isUserExcludedPath, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, saveConflictBackup, syncablePath, updateRemote, writeSyncMeta } from "./drive";
+import { conflictBackupName, createRemote, ensureFolder, isUserExcludedPath, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, syncablePath, updateRemote, writeSyncMeta } from "./drive";
 import type { ConflictInfo, FileSyncMeta, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
@@ -461,8 +461,8 @@ export class WorkspaceDriveSync {
 
   /**
    * Resolve conflicts per file by choosing the surviving side, the same way the
-   * GemiHub Obsidian plugin does: the losing side is backed up to the Drive
-   * `sync_conflicts/` folder before it is overwritten or deleted.
+   * GemiHub Obsidian plugin does: the losing side is backed up to the local,
+   * sync-excluded `GemiHub/conflict-backups/` folder first.
    */
   async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote" }>): Promise<number> {
     const connection = await this.assertWorkspace();
@@ -472,6 +472,7 @@ export class WorkspaceDriveSync {
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
     let touchedRemote = false;
     let resolved = 0;
+    const backupDirectory = "GemiHub/conflict-backups";
 
     const readLocal = async (path: string): Promise<string | ArrayBuffer> => {
       const raw = await files.read(path);
@@ -481,10 +482,22 @@ export class WorkspaceDriveSync {
       if (localByPath.has(path)) await files.update(path, value);
       else await files.create(path, value);
     };
+    let backupSequence = 0;
+    const saveLocalBackup = async (path: string, value: string | ArrayBuffer): Promise<void> => {
+      // Backups are deliberately local and excluded from sync. A sequence
+      // suffix prevents two resolutions in the same millisecond overwriting.
+      await files.createDirectory("GemiHub").catch(() => undefined);
+      await files.createDirectory(backupDirectory).catch(() => undefined);
+      const base = conflictBackupName(path, new Date());
+      const dot = base.lastIndexOf(".");
+      const suffix = `-${backupSequence++}`;
+      const name = dot > 0 ? `${base.slice(0, dot)}${suffix}${base.slice(dot)}` : `${base}${suffix}`;
+      await files.create(`${backupDirectory}/${name}`, value);
+    };
 
-    for (const { conflict: requested, choice } of resolutions) {
+    await parallelForEach(resolutions, async ({ conflict: requested, choice }) => {
       const conflict = current.get(requested.path);
-      if (!conflict || conflict.kind !== requested.kind) continue;
+      if (!conflict || conflict.kind !== requested.kind) return;
       const remoteFile = remote.files[conflict.id];
 
       if (conflict.kind === "localEditRemoteDelete") {
@@ -492,11 +505,11 @@ export class WorkspaceDriveSync {
           await createRemote(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
           touchedRemote = true;
         } else {
-          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
+          await saveLocalBackup(conflict.path, await readLocal(conflict.path));
           await files.delete(conflict.path);
         }
       } else if (conflict.kind === "localDeleteRemoteEdit") {
-        if (!remoteFile) continue;
+        if (!remoteFile) return;
         if (choice === "local") {
           const trash = await ensureFolder(this.api, session.accessToken, session.rootFolderId, "trash");
           await moveRemote(this.api, session.accessToken, conflict.id, session.rootFolderId, trash);
@@ -506,22 +519,22 @@ export class WorkspaceDriveSync {
           await writeLocal(remoteFile.name, isBinaryPath(remoteFile.name) ? content.buffer : content.text);
         }
       } else { // "edit" | "untracked": both sides exist
-        if (!remoteFile) continue;
+        if (!remoteFile) return;
         if (choice === "local") {
           const backup = await readRemote(this.api, session.accessToken, conflict.id);
-          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, remoteFile.name, isBinaryPath(remoteFile.name) ? backup.buffer : backup.text, remoteFile.mimeType);
+          await saveLocalBackup(remoteFile.name, isBinaryPath(remoteFile.name) ? backup.buffer : backup.text);
           if (remoteFile.name !== conflict.path) await renameRemote(this.api, session.accessToken, conflict.id, conflict.path);
           await updateRemote(this.api, session.accessToken, conflict.id, await readLocal(conflict.path), mimeType(conflict.path));
           touchedRemote = true;
         } else {
-          await saveConflictBackup(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
+          await saveLocalBackup(conflict.path, await readLocal(conflict.path));
           const content = await readRemote(this.api, session.accessToken, conflict.id);
           if (remoteFile.name !== conflict.path) await files.delete(conflict.path);
           await writeLocal(remoteFile.name, isBinaryPath(remoteFile.name) ? content.buffer : content.text);
         }
       }
       resolved++;
-    }
+    }, 5);
 
     let finalRemote = remote;
     if (touchedRemote) {

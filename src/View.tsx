@@ -149,7 +149,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })));
     const next = await client.status(); setStatus(next);
     setConflictPreviews({});
-    setMessage(`Resolved ${resolved} conflict(s); the other side was backed up to sync_conflicts/ on Drive. ${countStatus(next)}`);
+    setMessage(`Resolved ${resolved} conflict(s); the other side was backed up locally to GemiHub/conflict-backups/. ${countStatus(next)}`);
   };
 
   const toggleConflictPreview = async (conflict: ConflictInfo) => {
