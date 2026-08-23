@@ -360,7 +360,9 @@ export class WorkspaceDriveSync {
 
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };
     const renamedIds = new Set<string>();
-    for (const action of planPush(inventory, baseline, remote, caseInsensitive)) {
+    // Keep rename -> upload ordered within each file, while processing
+    // independent files concurrently to avoid one Drive round trip at a time.
+    await parallelForEach(planPush(inventory, baseline, remote, caseInsensitive), async (action) => {
       const activeSession = await this.tokens();
       const { local, id } = action;
       if (action.rename && id) {
@@ -369,13 +371,13 @@ export class WorkspaceDriveSync {
       }
       if (!action.upload) {
         if (!id || !renamedIds.has(id)) summary.skipped++;
-        continue;
+        return;
       }
       const raw = await files.read(local.path);
       const content = local.binary ? decodeDataURL(raw) : raw;
       if (action.upload === "update" && id) { await updateRemote(this.api, activeSession.accessToken, id, content, mimeType(local.path)); summary.updated++; }
       else { await createRemote(this.api, activeSession.accessToken, activeSession.rootFolderId, local.path, content, mimeType(local.path)); summary.created++; }
-    }
+    }, 5);
     if (status.localDeletes.length) {
       // Resolve delete targets by id, not by looking `pathToId[name]` back up:
       // when several Drive objects share a name (a stale duplicate left over
@@ -385,14 +387,15 @@ export class WorkspaceDriveSync {
       const deleteSession = await this.tokens();
       const trash = await ensureFolder(this.api, deleteSession.accessToken, deleteSession.rootFolderId, "trash");
       const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
-      for (const { id, previous, currentRemote } of unresolvedBaselineEntries(localIds, baseline, remote)) {
-        if (!currentRemote || renamedIds.has(id)) continue;
-        const remoteChanged = previous.md5Checksum !== currentRemote.md5Checksum || previous.name !== currentRemote.name;
-        if (remoteChanged) continue;
+      const deletions = unresolvedBaselineEntries(localIds, baseline, remote).filter(({ id, previous, currentRemote }) => {
+        if (!currentRemote || renamedIds.has(id)) return false;
+        return previous.md5Checksum === currentRemote.md5Checksum && previous.name === currentRemote.name;
+      });
+      await parallelForEach(deletions, async ({ id }) => {
         const activeSession = await this.tokens();
         await moveRemote(this.api, activeSession.accessToken, id, activeSession.rootFolderId, trash);
         summary.deleted++;
-      }
+      }, 5);
     }
     const finalSession = await this.tokens();
     const nextRemote = metaFromFiles(await listRootFiles(this.api, finalSession.accessToken, finalSession.rootFolderId));

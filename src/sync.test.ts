@@ -305,7 +305,7 @@ Deno.test("snapshot keeps pending local edits, deletes, and unresolved conflicts
   assertEquals(snapshot.pathToId["deleted.md"], "deleted");
 });
 
-Deno.test("pull worker pool limits concurrency", async () => {
+Deno.test("sync worker pool limits concurrency", async () => {
   let active = 0, maximum = 0, completed = 0;
   await parallelForEach(Array.from({ length: 17 }, (_, index) => index), async () => {
     active++; maximum = Math.max(maximum, active);
