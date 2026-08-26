@@ -4,6 +4,16 @@ import { WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 import { refreshDriveDecorations } from "./decorations";
 
+const clients = new WeakMap<PluginAPI, WorkspaceDriveSync>();
+
+function sharedClient(api: PluginAPI): WorkspaceDriveSync {
+  const existing = clients.get(api);
+  if (existing) return existing;
+  const client = new WorkspaceDriveSync(api);
+  clients.set(api, client);
+  return client;
+}
+
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
 }
@@ -87,7 +97,7 @@ function ConflictComparison({ value }: { value: ConflictPreview }) {
 
 export function DriveSyncView({ api }: { api: PluginAPI }) {
   const client = useMemo(() => {
-    try { return new WorkspaceDriveSync(api); }
+    try { return sharedClient(api); }
     catch (error) { return error instanceof Error ? error.message : String(error); }
   }, [api]);
   const [connection, setConnection] = useState<Awaited<ReturnType<WorkspaceDriveSync["connection"]>>>(null);
@@ -104,6 +114,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
 
   useEffect(() => {
     if (typeof client === "string") return;
+    setUnlocked(client.isUnlocked());
     void client.connection().then(setConnection).catch((error) => setMessage(String(error)));
   }, [client]);
 

@@ -252,6 +252,8 @@ export class WorkspaceDriveSync {
     if (!api.workspaceFiles || !api.storage || !api.network) throw new Error("This plugin requires Workspace files, storage, and network APIs from GemiHub Desktop.");
   }
 
+  isUnlocked(): boolean { return this.session !== null; }
+
   private async workspaceFiles(_expected?: Workspace): Promise<WorkspaceFilesAPI> {
     return this.api.workspaceFiles!;
   }
