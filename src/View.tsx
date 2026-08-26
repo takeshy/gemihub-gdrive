@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { WorkspaceDriveSync, type ConflictPreview } from "./sync";
+import { isTextPath, WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 import { refreshDriveDecorations } from "./decorations";
 import { sharedClient } from "./client";
-import { DriveComparison } from "./DiffViewer";
+import { DriveComparison, openDriveDiffViewer } from "./DiffViewer";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -45,6 +45,18 @@ function statItems(status: SyncStatus, key: StatKey): PreviewItem[] {
   else if (key === "pushDeletes") add(status.localDeletes, "deleted");
   else add(status.remoteDeletes, "deleted");
   return [...items].map(([path, type]) => ({ path, type })).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function hasLocalFile(status: SyncStatus, path: string): boolean {
+  if (status.localDeletes.includes(path) || status.remoteOnly.includes(path)) return false;
+  return !status.conflicts.some((conflict) => conflict.path === path && conflict.kind === "localDeleteRemoteEdit");
+}
+
+function ChangeButtons({ api, status, item, busy }: { api: PluginAPI; status: SyncStatus; item: PreviewItem; busy: boolean }) {
+  return <div className="gdrive-change-buttons">
+    {isTextPath(item.path) ? <button type="button" className="secondary" disabled={busy} onClick={() => openDriveDiffViewer(api, item.path)}>Diff</button> : null}
+    {hasLocalFile(status, item.path) && api.selectFile ? <button type="button" className="secondary" disabled={busy} onClick={() => api.selectFile?.(item.path)}>Open</button> : null}
+  </div>;
 }
 
 function conflictLabel(kind: ConflictInfo["kind"]): string {
@@ -167,7 +179,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       </div>}
       {status && statDetail ? <div className="gdrive-preview">
         <div className="gdrive-preview-header"><strong>{STAT_LABELS[statDetail]}</strong><span>{statItems(status, statDetail).length} file(s)</span></div>
-        {statItems(status, statDetail).length ? <ul>{statItems(status, statDetail).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files.</p>}
+        {statItems(status, statDetail).length ? <ul>{statItems(status, statDetail).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span><ChangeButtons api={api} status={status} item={item} busy={busy} /></li>)}</ul> : <p>No files.</p>}
       </div> : null}
       {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
         <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
@@ -194,7 +206,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       </div> : null}
       {status && preview ? <div className="gdrive-preview">
         <div className="gdrive-preview-header"><strong>{preview === "push" ? "Push to Drive" : "Pull to Workspace"}</strong><span>{previewItems(status, preview).length} file(s)</span></div>
-        {previewItems(status, preview).length ? <ul>{previewItems(status, preview).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span></li>)}</ul> : <p>No files to sync.</p>}
+        {previewItems(status, preview).length ? <ul>{previewItems(status, preview).map((item) => <li key={`${item.type}:${item.path}`} className={`is-${item.type}`}><span className="gdrive-preview-type">{item.type}</span><span>{item.path}</span><ChangeButtons api={api} status={status} item={item} busy={busy} /></li>)}</ul> : <p>No files to sync.</p>}
         {previewBlockReason(status, preview) ? <p className="danger">{previewBlockReason(status, preview)}</p> : null}
         <div className="gdrive-preview-actions">
           <button type="button" className="secondary" disabled={busy} onClick={() => setPreview(null)}>Cancel</button>

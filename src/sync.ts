@@ -384,6 +384,35 @@ export class WorkspaceDriveSync {
     return comparison;
   }
 
+  /** Replace one local file with its current Drive state (or delete it if Drive has no copy). */
+  async resetFileToDrive(path: string): Promise<"updated" | "created" | "deleted" | "unchanged"> {
+    const connection = await this.assertWorkspace();
+    const files = await this.workspaceFiles(connection.workspace);
+    const { session, inventory, baseline, remote } = await this.state();
+    const caseInsensitive = isWindowsWorkspace(connection.workspace);
+    const local = inventory.find((file) => pathKey(file.path, caseInsensitive) === pathKey(path, caseInsensitive));
+    const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
+    const baselineId = local ? localIds.get(local.path) : Object.entries(baseline.pathToId)
+      .find(([candidate]) => pathKey(candidate, caseInsensitive) === pathKey(path, caseInsensitive))?.[1];
+    const remoteEntry = baselineId && remote.files[baselineId]
+      ? { id: baselineId, file: remote.files[baselineId] }
+      : Object.entries(remote.files).map(([id, file]) => ({ id, file }))
+        .find(({ file }) => pathKey(file.name, caseInsensitive) === pathKey(path, caseInsensitive));
+    let result: "updated" | "created" | "deleted" | "unchanged" = "unchanged";
+    if (!remoteEntry) {
+      if (local) { await files.delete(local.path); result = "deleted"; }
+    } else {
+      const content = await readRemote(this.api, session.accessToken, remoteEntry.id);
+      const value = isBinaryPath(remoteEntry.file.name) ? content.buffer : content.text;
+      const target = inventory.find((file) => pathKey(file.path, caseInsensitive) === pathKey(remoteEntry.file.name, caseInsensitive));
+      if (local && pathKey(local.path, caseInsensitive) !== pathKey(remoteEntry.file.name, caseInsensitive)) await files.delete(local.path);
+      if (target) { await files.update(target.path, value); result = "updated"; }
+      else { await files.create(remoteEntry.file.name, value); result = "created"; }
+    }
+    await this.saveSnapshot(connection.workspace, remote, await this.inventory(), baseline);
+    return result;
+  }
+
   private async saveSnapshot(workspace: Workspace, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): Promise<void> {
     await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(workspace.id, remote, inventory, baseline, isWindowsWorkspace(workspace)));
   }

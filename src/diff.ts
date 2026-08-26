@@ -5,6 +5,28 @@ export type DiffLine = {
   newLine?: number;
 };
 
+export type SplitDiffRow = { left: DiffLine | null; right: DiffLine | null } | { gap: DiffLine };
+
+export function splitDiffRows(lines: DiffLine[]): SplitDiffRow[] {
+  const rows: SplitDiffRow[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.kind === "gap") { rows.push({ gap: line }); index++; continue; }
+    if (line.kind === "same") { rows.push({ left: line, right: line }); index++; continue; }
+    const removed: DiffLine[] = [], added: DiffLine[] = [];
+    while (index < lines.length && (lines[index].kind === "removed" || lines[index].kind === "added")) {
+      const changed = lines[index++];
+      if (changed.kind === "removed") removed.push(changed);
+      else added.push(changed);
+    }
+    for (let row = 0; row < Math.max(removed.length, added.length); row++) {
+      rows.push({ left: removed[row] ?? null, right: added[row] ?? null });
+    }
+  }
+  return rows;
+}
+
 function splitLines(value: string): string[] {
   const lines = value.replace(/\r\n/g, "\n").split("\n");
   if (lines.length > 1 && lines.at(-1) === "") lines.pop();
