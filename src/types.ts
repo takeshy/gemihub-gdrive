@@ -25,8 +25,13 @@ export interface PluginAPI {
   fileTree?: {
     registerDecorationProvider(provider: (target: { scope: "workspace" | "files"; path: string; isDirectory: boolean }) => { color?: string; title?: string } | null | undefined | Promise<{ color?: string; title?: string } | null | undefined>): () => void;
     refreshDecorations(): void;
+    registerContextMenuItem?(action: FileAction): () => void;
   };
+  fileViewer?: { registerAction?(action: FileAction): () => void };
 }
+
+export interface FileActionTarget { scope: "workspace" | "files"; path: string; name: string; isDirectory: boolean }
+export interface FileAction { id: string; label: string; when?(target: FileActionTarget): boolean; onClick(target: FileActionTarget): void | Promise<void> }
 
 export interface FileSyncMeta {
   name: string;

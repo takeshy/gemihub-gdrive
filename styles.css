@@ -51,6 +51,15 @@
 .gdrive-diff-gap { padding: 4px 12px; color: var(--muted); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .gdrive-binary-comparison { display: grid; grid-template-columns: 48px minmax(100px, 1fr) auto minmax(120px, 1fr); gap: 6px 10px; align-items: baseline; overflow-x: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
 .gdrive-binary-comparison code { color: var(--text); white-space: nowrap; }
+.gdrive-diff-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / .48); }
+.gdrive-diff-dialog { display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(1100px, 94vw); height: min(760px, 88vh); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px rgb(0 0 0 / .35); }
+.gdrive-diff-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 12px 14px; }
+.gdrive-diff-dialog > header > div { display: grid; gap: 3px; min-width: 0; }
+.gdrive-diff-dialog > header small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.gdrive-diff-dialog button { border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text); padding: 7px 10px; cursor: pointer; }
+.gdrive-diff-dialog-body { min-height: 0; overflow: auto; padding: 14px; }
+.gdrive-diff-dialog-body .gdrive-diff { max-height: none; }
+.gdrive-diff-dialog-body .danger { color: var(--danger); }
 @media (max-width: 620px) {
   .gdrive-conflict-buttons { grid-template-columns: 1fr; }
   .gdrive-conflict-detail { grid-column: 1; }

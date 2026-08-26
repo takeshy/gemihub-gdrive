@@ -1,18 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { lineDiff } from "./diff";
 import { WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 import { refreshDriveDecorations } from "./decorations";
-
-const clients = new WeakMap<PluginAPI, WorkspaceDriveSync>();
-
-function sharedClient(api: PluginAPI): WorkspaceDriveSync {
-  const existing = clients.get(api);
-  if (existing) return existing;
-  const client = new WorkspaceDriveSync(api);
-  clients.set(api, client);
-  return client;
-}
+import { sharedClient } from "./client";
+import { DriveComparison } from "./DiffViewer";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -63,36 +54,8 @@ function conflictLabel(kind: ConflictInfo["kind"]): string {
   return "edited on both sides";
 }
 
-function formatSize(value?: number): string {
-  if (value === undefined || !Number.isFinite(value)) return "—";
-  if (value < 1024) return `${value} B`;
-  const units = ["KB", "MB", "GB"];
-  let size = value / 1024, unit = units[0];
-  for (let index = 1; index < units.length && size >= 1024; index++) { size /= 1024; unit = units[index]; }
-  return `${size.toFixed(size >= 10 ? 1 : 2)} ${unit}`;
-}
-
 function ConflictComparison({ value }: { value: ConflictPreview }) {
-  if (value.binary) return <div className="gdrive-conflict-comparison">
-    <p>Binary files cannot be displayed as text. Compare their file information below.</p>
-    <div className="gdrive-binary-comparison">
-      <strong>Local</strong><span>{value.local.exists ? value.local.name : "Deleted"}</span><span>{formatSize(value.local.size)}</span><code>{value.local.md5 || "—"}</code>
-      <strong>Drive</strong><span>{value.remote.exists ? value.remote.name : "Deleted"}</span><span>{formatSize(value.remote.size)}</span><code>{value.remote.md5 || "—"}</code>
-    </div>
-  </div>;
-
-  const lines = lineDiff(value.local.text ?? "", value.remote.text ?? "");
-  return <div className="gdrive-conflict-comparison">
-    <div className="gdrive-diff-heading"><span>Local: {value.local.exists ? value.local.name : "Deleted"}</span><span>Drive: {value.remote.exists ? value.remote.name : "Deleted"}</span></div>
-    <div className="gdrive-diff" role="table" aria-label="Local to Drive differences">
-      {lines.map((line, index) => line.kind === "gap"
-        ? <div className="gdrive-diff-gap" key={`gap:${index}`}>⋯ {line.text} ⋯</div>
-        : <div className={`gdrive-diff-line is-${line.kind}`} key={`${line.kind}:${index}`}>
-          <span className="gdrive-diff-number">{line.oldLine ?? ""}</span><span className="gdrive-diff-number">{line.newLine ?? ""}</span>
-          <span className="gdrive-diff-mark">{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</span><code>{line.text || " "}</code>
-        </div>)}
-    </div>
-  </div>;
+  return <DriveComparison value={value} />;
 }
 
 export function DriveSyncView({ api }: { api: PluginAPI }) {

@@ -358,6 +358,32 @@ export class WorkspaceDriveSync {
     return preview;
   }
 
+  async fileComparison(path: string): Promise<ConflictPreview> {
+    const connection = await this.assertWorkspace();
+    const files = await this.workspaceFiles(connection.workspace);
+    const { session, inventory, baseline, remote } = await this.state();
+    const caseInsensitive = isWindowsWorkspace(connection.workspace);
+    const local = inventory.find((file) => pathKey(file.path, caseInsensitive) === pathKey(path, caseInsensitive));
+    const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
+    const id = local ? localIds.get(local.path) : baseline.pathToId[path];
+    const remoteEntry = id && remote.files[id]
+      ? { id, file: remote.files[id] }
+      : Object.entries(remote.files).map(([remoteId, file]) => ({ id: remoteId, file }))
+        .find(({ file }) => pathKey(file.name, caseInsensitive) === pathKey(path, caseInsensitive));
+    const remoteFile = remoteEntry?.file;
+    const binary = Boolean(local?.binary || (remoteFile && isBinaryPath(remoteFile.name)));
+    const comparison: ConflictPreview = {
+      binary,
+      local: { exists: !!local, name: local?.path ?? path, size: local?.size, md5: local?.md5 },
+      remote: { exists: !!remoteFile, name: remoteFile?.name ?? path, size: remoteFile?.size ? Number(remoteFile.size) : undefined, md5: remoteFile?.md5Checksum },
+    };
+    if (!binary) {
+      if (local) comparison.local.text = await files.read(local.path);
+      if (remoteEntry) comparison.remote.text = (await readRemote(this.api, session.accessToken, remoteEntry.id)).text;
+    }
+    return comparison;
+  }
+
   private async saveSnapshot(workspace: Workspace, remote: SyncMeta, inventory: WorkspaceFile[], baseline: LocalSyncMeta): Promise<void> {
     await this.api.storage!.set(SNAPSHOT_KEY, computeSnapshot(workspace.id, remote, inventory, baseline, isWindowsWorkspace(workspace)));
   }

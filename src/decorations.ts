@@ -1,4 +1,4 @@
-import { WorkspaceDriveSync } from "./sync";
+import { sharedClient } from "./client";
 import type { PluginAPI } from "./types";
 
 const modifiedPaths = new Set<string>();
@@ -21,7 +21,7 @@ export async function refreshDriveDecorations(api: PluginAPI): Promise<void> {
   const generation = ++refreshGeneration;
   let paths: string[] = [];
   try {
-    paths = await new WorkspaceDriveSync(api).localChangePaths();
+    paths = await sharedClient(api).localChangePaths();
   } catch {
     // A disconnected or switched Workspace has no meaningful sync decoration.
   }
