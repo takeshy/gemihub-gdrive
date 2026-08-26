@@ -100,6 +100,17 @@ function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta, ca
   return resolved;
 }
 
+export function computeLocalChangePaths(inventory: WorkspaceFile[], baseline: LocalSyncMeta, caseInsensitive = false): string[] {
+  const localIds = resolveLocalIds(inventory, baseline, caseInsensitive);
+  return sorted(inventory.flatMap((local) => {
+    const id = localIds.get(local.path);
+    const previous = id ? baseline.files[id] : undefined;
+    return !previous || previous.md5Checksum !== local.md5 || pathKey(previous.name, caseInsensitive) !== pathKey(local.path, caseInsensitive)
+      ? [local.path]
+      : [];
+  }));
+}
+
 export interface UnresolvedBaselineEntry { id: string; previous: LocalSyncMeta["files"][string]; currentRemote: FileSyncMeta | undefined }
 
 /**
@@ -306,6 +317,16 @@ export class WorkspaceDriveSync {
     return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote, caseInsensitive) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
+  async localChangePaths(): Promise<string[]> {
+    const connection = await this.connection();
+    if (!connection) return [];
+    await this.assertWorkspace(connection);
+    const [inventory, baseline] = await Promise.all([
+      this.inventory(),
+      this.snapshot(connection.workspace.id),
+    ]);
+    return computeLocalChangePaths(inventory, baseline, isWindowsWorkspace(connection.workspace));
+  }
 
   /** Read both sides of a current conflict without changing either side. */
   async conflictPreview(requested: ConflictInfo): Promise<ConflictPreview> {

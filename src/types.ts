@@ -21,6 +21,11 @@ export interface PluginAPI {
   workspaceFiles?: WorkspaceFilesAPI;
   storage?: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; getAll(): Promise<Record<string, unknown>> };
   network?: { request(request: HTTPRequest): Promise<HTTPResponse> };
+  onFilesChanged?(callback: (change: { scope?: "workspace" | "files"; path?: string; oldPath?: string; kind: "created" | "updated" | "renamed" | "deleted" | "refresh" }) => void): () => void;
+  fileTree?: {
+    registerDecorationProvider(provider: (target: { scope: "workspace" | "files"; path: string; isDirectory: boolean }) => { color?: string; title?: string } | null | undefined | Promise<{ color?: string; title?: string } | null | undefined>): () => void;
+    refreshDecorations(): void;
+  };
 }
 
 export interface FileSyncMeta {

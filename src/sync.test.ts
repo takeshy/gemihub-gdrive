@@ -1,12 +1,21 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
+import { computeLocalChangePaths, computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
 const local = (path: string, md5: string): WorkspaceFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
 const baseline = (md5 = "a"): LocalSyncMeta => ({ workspaceId: "p", lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5 } }, pathToId: { "notes/a.md": "id" } });
 const remote = (md5 = "a"): SyncMeta => ({ lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5, mimeType: "text/markdown", modifiedTime: "" } } });
+
+Deno.test("finds local files that need to be pushed for FileTree decorations", () => {
+  assertEquals(computeLocalChangePaths([local("notes/a.md", "a")], baseline()), []);
+  assertEquals(computeLocalChangePaths([
+    local("notes/a.md", "changed"),
+    local("notes/new.md", "new"),
+  ], baseline()), ["notes/a.md", "notes/new.md"]);
+  assertEquals(computeLocalChangePaths([local("notes/renamed.md", "a")], baseline()), ["notes/renamed.md"]);
+});
 
 Deno.test("classifies only known text extensions as text", () => {
   for (const path of ["notes/readme.md", "data/view.yaml", "boards/work.dashboard", "scores/song.audioscore", "src/main.tsx", "image.svg"]) {

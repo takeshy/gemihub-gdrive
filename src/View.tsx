@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { lineDiff } from "./diff";
 import { WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
+import { refreshDriveDecorations } from "./decorations";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -120,6 +121,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const refresh = async () => {
     const next = await client.status();
     setStatus(next); setPreview(null); setStatDetail(null); setMessage(countStatus(next));
+    await refreshDriveDecorations(api);
   };
 
   const prepare = async (direction: PreviewDirection) => {
@@ -135,6 +137,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     if (deletions && !window.confirm(`Push will move ${deletions} file(s) to GemiHub trash. Continue?`)) return;
     setMessage(`Push complete: ${summary(await client.push(deletions > 0))}`);
     setStatus(await client.status()); setPreview(null); setStatDetail(null);
+    await refreshDriveDecorations(api);
   };
 
   const pull = async () => {
@@ -143,6 +146,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     if (deletions && !window.confirm(`Pull will delete ${deletions} local workspace file(s). Continue?`)) return;
     setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
     setStatus(await client.status()); setPreview(null); setStatDetail(null);
+    await refreshDriveDecorations(api);
   };
 
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
@@ -150,6 +154,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const next = await client.status(); setStatus(next);
     setConflictPreviews({});
     setMessage(`Resolved ${resolved} conflict(s); the other side was backed up locally to GemiHub/conflict-backups/. ${countStatus(next)}`);
+    await refreshDriveDecorations(api);
   };
 
   const toggleConflictPreview = async (conflict: ConflictInfo) => {
