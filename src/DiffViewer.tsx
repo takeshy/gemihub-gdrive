@@ -6,6 +6,14 @@ import type { PluginAPI } from "./types";
 import { lineDiff, splitDiffRows, type DiffLine } from "./diff";
 
 type DiffViewMode = "unified" | "split";
+export type DriveDiffDirection = "local-to-drive" | "drive-to-local";
+const DIFF_VIEW_MODE_KEY = "gemihub-gdrive:diff-view-mode";
+
+function savedDiffViewMode(): DiffViewMode {
+  if (typeof window === "undefined") return "split";
+  try { return window.localStorage.getItem(DIFF_VIEW_MODE_KEY) === "unified" ? "unified" : "split"; }
+  catch { return "split"; }
+}
 
 function formatSize(value?: number): string {
   if (value === undefined || !Number.isFinite(value)) return "—";
@@ -18,8 +26,16 @@ function formatSize(value?: number): string {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${unit}`;
 }
 
-export function DriveComparison({ value }: { value: ConflictPreview }) {
-  const [viewMode, setViewMode] = useState<DiffViewMode>("unified");
+export function DriveComparison({ value, direction = "local-to-drive" }: { value: ConflictPreview; direction?: DriveDiffDirection }) {
+  const [viewMode, setViewMode] = useState<DiffViewMode>(savedDiffViewMode);
+  const selectViewMode = (mode: DiffViewMode) => {
+    setViewMode(mode);
+    try { window.localStorage.setItem(DIFF_VIEW_MODE_KEY, mode); } catch { /* Keep the in-memory selection. */ }
+  };
+  const before = direction === "drive-to-local" ? value.remote : value.local;
+  const after = direction === "drive-to-local" ? value.local : value.remote;
+  const beforeLabel = direction === "drive-to-local" ? "Drive" : "Local";
+  const afterLabel = direction === "drive-to-local" ? "Local" : "Drive";
   if (value.binary) return <div className="gdrive-conflict-comparison">
     <p>Binary files cannot be displayed as text. Compare their file information below.</p>
     <div className="gdrive-binary-comparison">
@@ -28,13 +44,13 @@ export function DriveComparison({ value }: { value: ConflictPreview }) {
     </div>
   </div>;
 
-  const lines = lineDiff(value.local.text ?? "", value.remote.text ?? "");
+  const lines = lineDiff(before.text ?? "", after.text ?? "");
   return <div className="gdrive-conflict-comparison">
     <div className="gdrive-diff-toolbar">
-      <div className="gdrive-diff-heading"><span>Local: {value.local.exists ? value.local.name : "Deleted"}</span><span>Drive: {value.remote.exists ? value.remote.name : "Deleted"}</span></div>
+      <div className="gdrive-diff-heading"><span>{beforeLabel}: {before.exists ? before.name : "Deleted"}</span><span>{afterLabel}: {after.exists ? after.name : "Deleted"}</span></div>
       <div className="gdrive-diff-mode" aria-label="Diff layout">
-        <button type="button" className={viewMode === "unified" ? "active" : ""} onClick={() => setViewMode("unified")}>Unified</button>
-        <button type="button" className={viewMode === "split" ? "active" : ""} onClick={() => setViewMode("split")}>Split</button>
+        <button type="button" className={viewMode === "unified" ? "active" : ""} onClick={() => selectViewMode("unified")}>Unified</button>
+        <button type="button" className={viewMode === "split" ? "active" : ""} onClick={() => selectViewMode("split")}>Split</button>
       </div>
     </div>
     {viewMode === "unified" ? <UnifiedDiff lines={lines} /> : <SplitDiff lines={lines} />}
@@ -70,7 +86,7 @@ function SplitDiffCell({ line, side }: { line: DiffLine | null; side: "local" | 
   </div>;
 }
 
-function DriveDiffDialog({ api, path, close }: { api: PluginAPI; path: string; close: () => void }) {
+function DriveDiffDialog({ api, path, direction, close }: { api: PluginAPI; path: string; direction: DriveDiffDirection; close: () => void }) {
   const [comparison, setComparison] = useState<ConflictPreview | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -86,18 +102,18 @@ function DriveDiffDialog({ api, path, close }: { api: PluginAPI; path: string; c
     <section className="gdrive-diff-dialog" role="dialog" aria-modal="true" aria-label={`Compare ${path} with Google Drive`}>
       <header><div><strong>Compare with Google Drive</strong><small>{path}</small></div><button type="button" className="secondary" onClick={close}>Close</button></header>
       <div className="gdrive-diff-dialog-body">
-        {error ? <p className="danger">{error}</p> : comparison ? <DriveComparison value={comparison} /> : <p>Loading local and Drive versions…</p>}
+        {error ? <p className="danger">{error}</p> : comparison ? <DriveComparison value={comparison} direction={direction} /> : <p>Loading local and Drive versions…</p>}
       </div>
     </section>
   </div>;
 }
 
-export function openDriveDiffViewer(api: PluginAPI, path: string): void {
+export function openDriveDiffViewer(api: PluginAPI, path: string, direction: DriveDiffDirection = "local-to-drive"): void {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   const close = () => { root.unmount(); container.remove(); };
-  root.render(<DriveDiffDialog api={api} path={path} close={close} />);
+  root.render(<DriveDiffDialog api={api} path={path} direction={direction} close={close} />);
 }
 
 export async function resetFileToDrive(api: PluginAPI, path: string): Promise<void> {

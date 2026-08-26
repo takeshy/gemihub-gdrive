@@ -3,7 +3,7 @@ import { isTextPath, WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 import { refreshDriveDecorations } from "./decorations";
 import { sharedClient } from "./client";
-import { DriveComparison, openDriveDiffViewer } from "./DiffViewer";
+import { DriveComparison, openDriveDiffViewer, type DriveDiffDirection } from "./DiffViewer";
 
 function summary(value: SyncSummary): string {
   return `created ${value.created}, updated ${value.updated}, renamed ${value.renamed}, deleted ${value.deleted}, skipped ${value.skipped}`;
@@ -52,9 +52,15 @@ function hasLocalFile(status: SyncStatus, path: string): boolean {
   return !status.conflicts.some((conflict) => conflict.path === path && conflict.kind === "localDeleteRemoteEdit");
 }
 
+function changeDiffDirection(status: SyncStatus, path: string): DriveDiffDirection {
+  const localChange = status.localChanges.includes(path) || status.localOnly.includes(path) || status.localDeletes.includes(path);
+  const remoteChange = status.remoteChanges.includes(path) || status.remoteOnly.includes(path) || status.remoteDeletes.includes(path);
+  return localChange && !remoteChange ? "drive-to-local" : "local-to-drive";
+}
+
 function ChangeButtons({ api, status, item, busy }: { api: PluginAPI; status: SyncStatus; item: PreviewItem; busy: boolean }) {
   return <div className="gdrive-change-buttons">
-    {isTextPath(item.path) ? <button type="button" className="secondary" disabled={busy} onClick={() => openDriveDiffViewer(api, item.path)}>Diff</button> : null}
+    {isTextPath(item.path) ? <button type="button" className="secondary" disabled={busy} onClick={() => openDriveDiffViewer(api, item.path, changeDiffDirection(status, item.path))}>Diff</button> : null}
     {hasLocalFile(status, item.path) && api.selectFile ? <button type="button" className="secondary" disabled={busy} onClick={() => api.selectFile?.(item.path)}>Open</button> : null}
   </div>;
 }
