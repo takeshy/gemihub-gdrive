@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { assertEquals } from "jsr:@std/assert";
-import { computeLocalChangePaths, computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
+import { applyRemoteResolutions, computeLocalChangePaths, computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
 import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
@@ -312,6 +312,33 @@ Deno.test("snapshot keeps pending local edits, deletes, and unresolved conflicts
   // An unresolved untracked conflict must not be adopted as synchronized.
   assertEquals(snapshot.files.untracked, undefined);
   assertEquals(snapshot.pathToId["deleted.md"], "deleted");
+});
+
+Deno.test("keep remote clears an edit conflict even when workspace inventory is stale", () => {
+  const previous = baseline();
+  const currentRemote = remote("remote");
+  const staleInventory = [local("notes/a.md", "local")];
+  const conflict = computeStatus(staleInventory, previous, currentRemote).conflicts[0];
+
+  const conservative = computeSnapshot("p", currentRemote, staleInventory, previous);
+  const resolved = applyRemoteResolutions(conservative, currentRemote, [conflict]);
+
+  assertEquals(computeStatus(staleInventory, resolved, currentRemote).conflicts, []);
+  assertEquals(resolved.files.id, { name: "notes/a.md", md5Checksum: "remote" });
+});
+
+Deno.test("keep remote clears a remote-delete conflict even when workspace inventory is stale", () => {
+  const previous = baseline();
+  const currentRemote: SyncMeta = { lastUpdatedAt: "", files: {} };
+  const staleInventory = [local("notes/a.md", "local")];
+  const conflict = computeStatus(staleInventory, previous, currentRemote).conflicts[0];
+
+  const conservative = computeSnapshot("p", currentRemote, staleInventory, previous);
+  const resolved = applyRemoteResolutions(conservative, currentRemote, [conflict]);
+
+  assertEquals(computeStatus(staleInventory, resolved, currentRemote).conflicts, []);
+  assertEquals(resolved.files.id, undefined);
+  assertEquals(resolved.pathToId["notes/a.md"], undefined);
 });
 
 Deno.test("sync worker pool limits concurrency", async () => {

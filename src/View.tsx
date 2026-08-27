@@ -92,6 +92,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [preview, setPreview] = useState<PreviewDirection | null>(null);
   const [statDetail, setStatDetail] = useState<StatKey | null>(null);
   const [conflictPreviews, setConflictPreviews] = useState<Record<string, { open: boolean; loading?: boolean; value?: ConflictPreview; error?: string }>>({});
+  const [skipConflictBackups, setSkipConflictBackups] = useState(false);
 
   useEffect(() => {
     if (typeof client === "string") return;
@@ -142,10 +143,11 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   };
 
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
-    const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })));
+    const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })), !skipConflictBackups);
     const next = await client.status(); setStatus(next);
     setConflictPreviews({});
-    setMessage(`Resolved ${resolved} conflict(s); the other side was backed up locally to GemiHub/conflict-backups/. ${countStatus(next)}`);
+    const backupMessage = skipConflictBackups ? "No conflict backups were saved." : "The other side was backed up locally to GemiHub/conflict-backups/.";
+    setMessage(`Resolved ${resolved} conflict(s). ${backupMessage} ${countStatus(next)}`);
     await refreshDriveDecorations(api);
   };
 
@@ -189,7 +191,11 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       </div> : null}
       {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
         <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
-        <p>Choose which side to keep for each file. The other side is backed up to <code>sync_conflicts/</code> on Drive.</p>
+        <p>Choose which side to keep for each file. By default, the other side is backed up locally to <code>GemiHub/conflict-backups/</code>.</p>
+        <label className="gdrive-conflict-backup-option">
+          <input type="checkbox" checked={skipConflictBackups} disabled={busy} onChange={(event) => setSkipConflictBackups(event.target.checked)} />
+          <span>Do not save conflict backups</span>
+        </label>
         <ul>{status.conflicts.map((conflict) => {
           const key = `${conflict.kind}:${conflict.path}`;
           const comparison = conflictPreviews[key];
