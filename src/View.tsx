@@ -143,11 +143,10 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   };
 
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
-    const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice })), !skipConflictBackups);
+    const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice, backup: !skipConflictBackups })));
     const next = await client.status(); setStatus(next);
     setConflictPreviews({});
-    const backupMessage = skipConflictBackups ? "No conflict backups were saved." : "The other side was backed up locally to GemiHub/conflict-backups/.";
-    setMessage(`Resolved ${resolved} conflict(s). ${backupMessage} ${countStatus(next)}`);
+    setMessage(`Resolved ${resolved} conflict(s). ${countStatus(next)}`);
     await refreshDriveDecorations(api);
   };
 
@@ -191,7 +190,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       </div> : null}
       {status?.conflicts.length ? <div className="gdrive-preview gdrive-conflicts">
         <div className="gdrive-preview-header"><strong>Conflicts</strong><span>{status.conflicts.length} file(s)</span></div>
-        <p>Choose which side to keep for each file. By default, the other side is backed up locally to <code>GemiHub/conflict-backups/</code>.</p>
+        <p>Choose which side to keep for each file. By default, the discarded versions are backed up locally to <code>GemiHub/conflict-backups/</code>.</p>
         <label className="gdrive-conflict-backup-option">
           <input type="checkbox" checked={skipConflictBackups} disabled={busy} onChange={(event) => setSkipConflictBackups(event.target.checked)} />
           <span>Do not save conflict backups</span>

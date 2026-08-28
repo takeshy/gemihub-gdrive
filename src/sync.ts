@@ -181,26 +181,20 @@ export function computeSnapshot(workspaceId: string, remote: SyncMeta, inventory
   return { workspaceId, lastUpdatedAt: remote.lastUpdatedAt, files, pathToId };
 }
 
-/**
- * A conflict choice is stronger than the conservative snapshot rules above.
- * In particular, Workspace inventory can briefly return the pre-write checksum
- * after Keep remote. Record the chosen Drive state explicitly so that stale
- * inventory cannot turn the same file back into a conflict on the next check.
- */
-export function applyRemoteResolutions(snapshot: LocalSyncMeta, remote: SyncMeta, conflicts: ConflictInfo[], caseInsensitive = false): LocalSyncMeta {
+export function adoptResolvedConflicts(snapshot: LocalSyncMeta, remote: SyncMeta, conflicts: ConflictInfo[], caseInsensitive = false): LocalSyncMeta {
   const files = { ...snapshot.files };
   const pathToId = { ...snapshot.pathToId };
   for (const conflict of conflicts) {
-    for (const [path, id] of Object.entries(pathToId)) {
-      if (id === conflict.id || pathKey(path, caseInsensitive) === pathKey(conflict.path, caseInsensitive)) delete pathToId[path];
-    }
-    const remoteFile = remote.files[conflict.id];
-    if (!remoteFile) {
-      delete files[conflict.id];
-      continue;
-    }
-    files[conflict.id] = { name: remoteFile.name, md5Checksum: remoteFile.md5Checksum };
-    pathToId[remoteFile.name] = conflict.id;
+    delete files[conflict.id];
+    for (const [path, id] of Object.entries(pathToId)) if (id === conflict.id) delete pathToId[path];
+    const remoteEntry = remote.files[conflict.id]
+      ? { id: conflict.id, file: remote.files[conflict.id] }
+      : Object.entries(remote.files).map(([id, file]) => ({ id, file })).find(({ file }) =>
+        [conflict.path, conflict.remoteName].some((path) => path && pathKey(path, caseInsensitive) === pathKey(file.name, caseInsensitive))
+      );
+    if (!remoteEntry) continue;
+    files[remoteEntry.id] = { name: remoteEntry.file.name, md5Checksum: remoteEntry.file.md5Checksum };
+    pathToId[remoteEntry.file.name] = remoteEntry.id;
   }
   return { ...snapshot, files, pathToId };
 }
@@ -569,7 +563,7 @@ export class WorkspaceDriveSync {
    * GemiHub Obsidian plugin does: the losing side is backed up to the local,
    * sync-excluded `GemiHub/conflict-backups/` folder first.
    */
-  async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote" }>, saveBackups = true): Promise<number> {
+  async resolveConflicts(resolutions: Array<{ conflict: ConflictInfo; choice: "local" | "remote"; backup?: boolean }>): Promise<number> {
     const connection = await this.assertWorkspace();
     const files = await this.workspaceFiles(connection.workspace);
     const { session, inventory, baseline, remote, status } = await this.state();
@@ -577,7 +571,7 @@ export class WorkspaceDriveSync {
     const localByPath = new Map(inventory.map((file) => [file.path, file]));
     let touchedRemote = false;
     let resolved = 0;
-    const keptRemote: ConflictInfo[] = [];
+    const resolvedConflicts: ConflictInfo[] = [];
     const backupDirectory = "GemiHub/conflict-backups";
 
     const readLocal = async (path: string): Promise<string | ArrayBuffer> => {
@@ -601,7 +595,7 @@ export class WorkspaceDriveSync {
       await files.create(`${backupDirectory}/${name}`, value);
     };
 
-    await parallelForEach(resolutions, async ({ conflict: requested, choice }) => {
+    await parallelForEach(resolutions, async ({ conflict: requested, choice, backup = true }) => {
       const conflict = current.get(requested.path);
       if (!conflict || conflict.kind !== requested.kind) return;
       const remoteFile = remote.files[conflict.id];
@@ -611,7 +605,7 @@ export class WorkspaceDriveSync {
           await createRemote(this.api, session.accessToken, session.rootFolderId, conflict.path, await readLocal(conflict.path), mimeType(conflict.path));
           touchedRemote = true;
         } else {
-          if (saveBackups) await saveLocalBackup(conflict.path, await readLocal(conflict.path));
+          if (backup) await saveLocalBackup(conflict.path, await readLocal(conflict.path));
           await files.delete(conflict.path);
         }
       } else if (conflict.kind === "localDeleteRemoteEdit") {
@@ -627,21 +621,21 @@ export class WorkspaceDriveSync {
       } else { // "edit" | "untracked": both sides exist
         if (!remoteFile) return;
         if (choice === "local") {
-          if (saveBackups) {
-            const backup = await readRemote(this.api, session.accessToken, conflict.id);
-            await saveLocalBackup(remoteFile.name, isBinaryPath(remoteFile.name) ? backup.buffer : backup.text);
+          if (backup) {
+            const losingRemote = await readRemote(this.api, session.accessToken, conflict.id);
+            await saveLocalBackup(remoteFile.name, isBinaryPath(remoteFile.name) ? losingRemote.buffer : losingRemote.text);
           }
           if (remoteFile.name !== conflict.path) await renameRemote(this.api, session.accessToken, conflict.id, conflict.path);
           await updateRemote(this.api, session.accessToken, conflict.id, await readLocal(conflict.path), mimeType(conflict.path));
           touchedRemote = true;
         } else {
-          if (saveBackups) await saveLocalBackup(conflict.path, await readLocal(conflict.path));
+          if (backup) await saveLocalBackup(conflict.path, await readLocal(conflict.path));
           const content = await readRemote(this.api, session.accessToken, conflict.id);
           if (remoteFile.name !== conflict.path) await files.delete(conflict.path);
           await writeLocal(remoteFile.name, isBinaryPath(remoteFile.name) ? content.buffer : content.text);
         }
       }
-      if (choice === "remote") keptRemote.push(conflict);
+      resolvedConflicts.push(conflict);
       resolved++;
     }, 5);
 
@@ -650,10 +644,8 @@ export class WorkspaceDriveSync {
       const nextRemote = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
       finalRemote = await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, nextRemote);
     }
-    const nextInventory = await this.inventory();
-    const caseInsensitive = isWindowsWorkspace(connection.workspace);
-    const snapshot = computeSnapshot(connection.workspace.id, finalRemote, nextInventory, baseline, caseInsensitive);
-    await this.api.storage!.set(SNAPSHOT_KEY, applyRemoteResolutions(snapshot, finalRemote, keptRemote, caseInsensitive));
+    const nextSnapshot = computeSnapshot(connection.workspace.id, finalRemote, await this.inventory(), baseline, isWindowsWorkspace(connection.workspace));
+    await this.api.storage!.set(SNAPSHOT_KEY, adoptResolvedConflicts(nextSnapshot, finalRemote, resolvedConflicts, isWindowsWorkspace(connection.workspace)));
     return resolved;
   }
 }
