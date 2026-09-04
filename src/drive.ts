@@ -130,11 +130,6 @@ export function conflictBackupName(path: string, now = new Date()): string {
   return dot > 0 ? `${safe.slice(0, dot)}_${timestamp}${safe.slice(dot)}` : `${safe}_${timestamp}`;
 }
 
-export async function saveConflictBackup(api: PluginAPI, accessToken: string, rootFolderId: string, path: string, content: string | ArrayBuffer, mimeType: string): Promise<void> {
-  const folder = await ensureFolder(api, accessToken, rootFolderId, "sync_conflicts");
-  await createRemote(api, accessToken, folder, conflictBackupName(path), content, typeof content === "string" ? "text/plain" : mimeType);
-}
-
 export async function moveRemote(api: PluginAPI, accessToken: string, id: string, from: string, to: string): Promise<void> {
   await driveRequest(api, `${API}/files/${encodeURIComponent(id)}?addParents=${encodeURIComponent(to)}&removeParents=${encodeURIComponent(from)}&fields=id`, accessToken, { method: "PATCH" });
 }
