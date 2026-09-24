@@ -15,6 +15,6 @@
     "typescript": "^6.0.0"
   },
   "dependencies": {
-    "gemihub-sync-core": "github:takeshy/gemihub-sync-core#e3eccda649bd9906c1253b66e682c900fdb82d3a"
+    "gemihub-sync-core": "github:takeshy/gemihub-sync-core#8d60c4d8d09ae667ae4a057da4aaa2d60c34d3d0"
   }
 }

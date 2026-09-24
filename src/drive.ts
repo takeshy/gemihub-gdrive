@@ -3,6 +3,7 @@ import { createDriveClient, headersFromRecord, type DriveFile, type DriveHttpRes
 import { buildConflictBackupName } from "gemihub-sync-core/conflict";
 import { isGoogleWorkspaceMimeType, isSyncExcludedPath } from "gemihub-sync-core/paths";
 import { reconcileSyncMetaWithListing, syncMetaFromDriveFiles } from "gemihub-sync-core/protocol";
+import { createSyncMetaStore } from "gemihub-sync-core/sync-meta";
 import type { PluginAPI, SyncMeta } from "./types";
 
 // System names/folders, exclusion patterns and conflict names are shared with
@@ -122,42 +123,45 @@ function syncMetaSignature(value: SyncMeta): string {
     .map(([id, file]) => [id, file.name, file.mimeType, file.md5Checksum, file.modifiedTime, file.size]));
 }
 
+function syncMetaStore(api: PluginAPI) {
+  return createSyncMetaStore(driveClient(api));
+}
+
+/**
+ * Registry reconciled with the root listing by the rules shared with GemiHub
+ * web and Obsidian: duplicate `_sync-meta.json` files are consolidated,
+ * missing entries are verified by ID before removal, drifted entries adopt the
+ * Drive state and untracked syncable files are registered. The result only
+ * contains files this workspace syncs.
+ */
 export async function readSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string): Promise<SyncMeta> {
-  const file = await findByName(api, accessToken, rootFolderId, "_sync-meta.json");
-  let parsed: SyncMeta | null = null;
-  if (file) {
-    try {
-      parsed = JSON.parse((await readRemote(api, accessToken, file.id)).text) as SyncMeta;
-      parsed.files = Object.fromEntries(Object.entries(parsed.files ?? {}).filter(([, item]) => syncableDriveFile(item)));
-    } catch { /* reconcile the live Drive listing without malformed metadata */ }
-  }
-  return reconcileSyncMeta(parsed, await listRootFiles(api, accessToken, rootFolderId));
+  const { meta } = await syncMetaStore(api).readReconciled(accessToken, rootFolderId, { isAdoptable: syncableDriveFile });
+  return {
+    lastUpdatedAt: meta?.lastUpdatedAt || new Date().toISOString(),
+    files: Object.fromEntries(Object.entries(meta?.files ?? {}).filter(([, item]) => syncableDriveFile(item))),
+  };
 }
 
 export async function writeSyncMeta(api: PluginAPI, accessToken: string, rootFolderId: string, meta: SyncMeta): Promise<SyncMeta> {
+  const store = syncMetaStore(api);
   let expected = meta;
   for (let attempt = 0; attempt < 2; attempt++) {
     const liveFiles = await listRootFiles(api, accessToken, rootFolderId);
     expected = reconcileSyncMeta(expected, liveFiles);
     expected.lastUpdatedAt = new Date().toISOString();
-    const matches = await findAllByName(api, accessToken, rootFolderId, "_sync-meta.json");
+    // Consolidates duplicate _sync-meta.json files into one before writing.
+    const { meta: current, fileId } = await store.readWithFile(accessToken, rootFolderId);
     const nativeFiles: SyncMeta["files"] = {};
     const previousEntries: SyncMeta["files"] = {};
-    for (const match of matches) {
-      try {
-        const current = JSON.parse((await readRemote(api, accessToken, match.id)).text) as SyncMeta;
-        for (const [id, item] of Object.entries(current.files ?? {})) {
-          if (isGoogleWorkspaceFile(item)) nativeFiles[id] = item;
-          else previousEntries[id] = { ...previousEntries[id], ...item };
-        }
-      } catch { /* overwrite malformed or unreadable duplicate metadata */ }
+    for (const [id, item] of Object.entries(current?.files ?? {})) {
+      if (isGoogleWorkspaceFile(item)) nativeFiles[id] = item;
+      else previousEntries[id] = item;
     }
-    // GemiHub keeps sharing state (shared/webViewLink) only inside _sync-meta.json,
-    // so entries rebuilt from the Drive listing must carry the current fields over.
+    // GemiHub keeps sharing state (shared/webViewLink/publicPath) only inside
+    // _sync-meta.json, so entries rebuilt from the Drive listing must carry the
+    // current fields over.
     const files = Object.fromEntries(Object.entries(expected.files).map(([id, file]) => [id, { ...previousEntries[id], ...file }]));
-    const content = JSON.stringify({ ...expected, files: { ...nativeFiles, ...files } }, null, 2);
-    if (matches.length) await Promise.all(matches.map((match) => updateRemote(api, accessToken, match.id, content, "application/json")));
-    else await createRemote(api, accessToken, rootFolderId, "_sync-meta.json", content, "application/json");
+    await store.write(accessToken, rootFolderId, { ...expected, files: { ...nativeFiles, ...files } }, { knownFileId: fileId });
 
     const after = metaFromFiles(await listRootFiles(api, accessToken, rootFolderId));
     if (syncMetaSignature(after) === syncMetaSignature(expected)) return expected;

@@ -8,6 +8,7 @@
     "gemihub-sync-core/crypto": "./node_modules/gemihub-sync-core/dist/crypto/index.js",
     "gemihub-sync-core/auth": "./node_modules/gemihub-sync-core/dist/auth/index.js",
     "gemihub-sync-core/hash": "./node_modules/gemihub-sync-core/dist/hash/index.js",
-    "gemihub-sync-core/drive": "./node_modules/gemihub-sync-core/dist/drive/index.js"
+    "gemihub-sync-core/drive": "./node_modules/gemihub-sync-core/dist/drive/index.js",
+    "gemihub-sync-core/sync-meta": "./node_modules/gemihub-sync-core/dist/sync-meta/index.js"
   }
 }
