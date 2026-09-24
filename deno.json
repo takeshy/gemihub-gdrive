@@ -4,6 +4,9 @@
     "gemihub-sync-core/protocol": "./node_modules/gemihub-sync-core/dist/protocol/index.js",
     "gemihub-sync-core/paths": "./node_modules/gemihub-sync-core/dist/paths/index.js",
     "gemihub-sync-core/files": "./node_modules/gemihub-sync-core/dist/files/index.js",
-    "gemihub-sync-core/conflict": "./node_modules/gemihub-sync-core/dist/conflict/index.js"
+    "gemihub-sync-core/conflict": "./node_modules/gemihub-sync-core/dist/conflict/index.js",
+    "gemihub-sync-core/crypto": "./node_modules/gemihub-sync-core/dist/crypto/index.js",
+    "gemihub-sync-core/auth": "./node_modules/gemihub-sync-core/dist/auth/index.js",
+    "gemihub-sync-core/hash": "./node_modules/gemihub-sync-core/dist/hash/index.js"
   }
 }
