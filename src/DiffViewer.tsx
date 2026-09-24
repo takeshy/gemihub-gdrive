@@ -4,6 +4,7 @@ import { sharedClient } from "./client";
 import type { ConflictPreview } from "./sync";
 import type { PluginAPI } from "./types";
 import { lineDiff, splitDiffRows, type DiffLine } from "./diff";
+import { showToast } from "./toast";
 
 type DiffViewMode = "unified" | "split";
 export type DriveDiffDirection = "local-to-drive" | "drive-to-local";
@@ -120,7 +121,7 @@ export async function resetFileToDrive(api: PluginAPI, path: string): Promise<vo
   if (!window.confirm(`Replace the local state of “${path}” with its current Google Drive state? Local-only files will be deleted.`)) return;
   const result = await sharedClient(api).resetFileToDrive(path);
   api.fileTree?.refreshDecorations();
-  window.alert(result === "unchanged" ? "The file is already in the Google Drive state." : `Local file ${result} from Google Drive.`);
+  showToast(result === "unchanged" ? "The file is already in the Google Drive state." : `Local file ${result} from Google Drive.`);
 }
 
 export function installDriveDiffActions(api: PluginAPI): () => void {

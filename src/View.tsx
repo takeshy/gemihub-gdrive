@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { isTextPath, WorkspaceDriveSync, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
+import { showToast } from "./toast";
 import { refreshDriveDecorations } from "./decorations";
 import { sharedClient } from "./client";
 import { DriveComparison, openDriveDiffViewer, type DriveDiffDirection } from "./DiffViewer";
@@ -128,7 +129,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
     const next = await client.status(); setStatus(next);
     const deletions = next.localDeletes.length;
     if (deletions && !window.confirm(`Push will move ${deletions} file(s) to GemiHub trash. Continue?`)) return;
-    setMessage(`Push complete: ${summary(await client.push(deletions > 0))}`);
+    showToast(`Push complete: ${summary(await client.push(deletions > 0))}`);
     setStatus(await client.status()); setPreview(null); setStatDetail(null);
     await refreshDriveDecorations(api);
   };
@@ -136,8 +137,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const pull = async () => {
     const next = await client.status(); setStatus(next);
     const deletions = next.remoteDeletes.length;
-    if (deletions && !window.confirm(`Pull will delete ${deletions} local workspace file(s). Continue?`)) return;
-    setMessage(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
+    showToast(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
     setStatus(await client.status()); setPreview(null); setStatDetail(null);
     await refreshDriveDecorations(api);
   };
@@ -174,7 +174,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       <p>接続先Workspace: <strong>{connection.workspace.name}</strong></p>
       <label><span>GemiHub encryption password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} /></label>
       <button type="button" disabled={busy || !password} onClick={() => void run(async () => { await client.unlock(password); setPassword(""); setUnlocked(true); setMessage("Drive connection unlocked for this session."); })}>Unlock</button>
-      <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => { await client.reset(); setConnection(null); setStatus(null); setMessage("Connection reset."); })}>Reset connection</button>
+      <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => { await client.reset(); setConnection(null); setStatus(null); showToast("Connection reset."); })}>Reset connection</button>
     </div> : <div className="gdrive-actions">
       <div className="gdrive-workspace"><span>Workspace</span><strong>{connection.workspace.name}</strong><small>{connection.workspace.path}</small></div>
       {status && <div className="gdrive-status-grid">
