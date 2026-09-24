@@ -1,16 +1,15 @@
-import { request, type TransportResponse } from "./transport";
+import { request } from "./transport";
+import { createDriveClient, headersFromRecord, type DriveFile, type DriveHttpResponse } from "gemihub-sync-core/drive";
 import { buildConflictBackupName } from "gemihub-sync-core/conflict";
 import { isGoogleWorkspaceMimeType, isSyncExcludedPath } from "gemihub-sync-core/paths";
 import { reconcileSyncMetaWithListing, syncMetaFromDriveFiles } from "gemihub-sync-core/protocol";
 import type { PluginAPI, SyncMeta } from "./types";
 
-const API = "https://www.googleapis.com/drive/v3";
-const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 // System names/folders, exclusion patterns and conflict names are shared with
 // GemiHub web and Obsidian through gemihub-sync-core.
 export { SYNC_EXCLUDED_FILE_NAMES as SYSTEM_NAMES, SYNC_EXCLUDED_PREFIXES as SYSTEM_PREFIXES, isUserExcludedPath } from "gemihub-sync-core/paths";
 
-export interface DriveFile { id: string; name: string; mimeType: string; modifiedTime?: string; createdTime?: string; parents?: string[]; md5Checksum?: string; size?: string }
+export type { DriveFile };
 
 export function isGoogleWorkspaceFile(file: Pick<DriveFile, "mimeType">): boolean {
   return isGoogleWorkspaceMimeType(file.mimeType);
@@ -20,104 +19,87 @@ export function syncableDriveFile(file: Pick<DriveFile, "name" | "mimeType">): b
   return syncablePath(file.name) && !isGoogleWorkspaceFile(file);
 }
 
-function escapeQuery(value: string): string { return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
-
 /** Desktop keeps workspace state in `.llm-hub/`; everything else is the shared rule. */
 export function syncablePath(path: string): boolean {
   return !isSyncExcludedPath(path, { extraSegments: [".llm-hub"] });
 }
 
-async function driveRequest(api: PluginAPI, url: string, accessToken: string, options: { method?: string; headers?: Record<string, string>; body?: string | ArrayBuffer; contentType?: string } = {}, retries = 2): Promise<TransportResponse> {
-  const response = await request(api, url, {
-    method: options.method ?? "GET",
-    headers: { Authorization: `Bearer ${accessToken}`, ...(options.contentType ? { "Content-Type": options.contentType } : {}), ...options.headers },
-    body: options.body,
-  });
-  if ((response.status === 429 || response.status === 503) && retries > 0) {
-    const seconds = Math.min(10, Number.parseInt(response.headers["retry-after"] ?? "2", 10) || 2);
-    await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
-    return driveRequest(api, url, accessToken, options, retries - 1);
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+// The Drive REST client (requests, retries, pagination, multipart, errors) is
+// shared with GemiHub web and Obsidian; Desktop's network API is the transport.
+const clients = new WeakMap<PluginAPI, ReturnType<typeof createDriveClient>>();
+
+function driveClient(api: PluginAPI) {
+  let client = clients.get(api);
+  if (!client) {
+    client = createDriveClient(async (req): Promise<DriveHttpResponse> => {
+      const response = await request(api, req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body instanceof Uint8Array ? toArrayBuffer(req.body) : req.body,
+      });
+      return {
+        status: response.status,
+        headers: headersFromRecord(response.headers),
+        text: () => Promise.resolve(response.text),
+        json: () => Promise.resolve(response.json),
+        arrayBuffer: () => Promise.resolve(response.arrayBuffer),
+      };
+    });
+    clients.set(api, client);
   }
-  if (response.status < 200 || response.status >= 300) throw new Error(`Google Drive API ${response.status}: ${response.text.slice(0, 240)}`);
-  return response;
+  return client;
 }
 
 export async function listRootFiles(api: PluginAPI, accessToken: string, rootFolderId: string): Promise<DriveFile[]> {
-  const files: DriveFile[] = [];
-  let pageToken = "";
-  do {
-    const url = new URL(`${API}/files`);
-    url.searchParams.set("q", `'${escapeQuery(rootFolderId)}' in parents and trashed=false`);
-    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents)");
-    url.searchParams.set("pageSize", "1000");
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
-    const body = (await driveRequest(api, url.toString(), accessToken)).json as { files?: DriveFile[]; nextPageToken?: string };
-    files.push(...(body.files ?? []));
-    pageToken = body.nextPageToken ?? "";
-  } while (pageToken);
-  return files.filter(syncableDriveFile);
+  return (await driveClient(api).listFiles(accessToken, rootFolderId)).filter(syncableDriveFile);
 }
 
 export async function findByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile | null> {
   return (await findAllByName(api, accessToken, rootFolderId, name))[0] ?? null;
 }
 
-async function findAllByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile[]> {
-  const query = encodeURIComponent(`name='${escapeQuery(name)}' and '${escapeQuery(rootFolderId)}' in parents and trashed=false`);
-  const body = (await driveRequest(api, `${API}/files?q=${query}&orderBy=modifiedTime%20desc&fields=files(id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents)&pageSize=1000`, accessToken)).json as { files?: DriveFile[] };
-  return body.files ?? [];
+function findAllByName(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<DriveFile[]> {
+  return driveClient(api).findFilesByExactName(accessToken, name, rootFolderId);
 }
 
 export async function readRemote(api: PluginAPI, accessToken: string, id: string): Promise<{ text: string; buffer: ArrayBuffer }> {
-  const response = await driveRequest(api, `${API}/files/${encodeURIComponent(id)}?alt=media`, accessToken);
-  return { text: response.text, buffer: response.arrayBuffer };
+  const response = await driveClient(api).readFileResponse(accessToken, id);
+  return { text: await response.text(), buffer: await response.arrayBuffer() };
 }
 
-function multipart(name: string, content: string | ArrayBuffer, mimeType: string, parent: string): { body: string | ArrayBuffer; contentType: string } {
-  const boundary = `gemihub-gdrive-${crypto.randomUUID()}`;
-  const metadata = JSON.stringify({ name, mimeType, parents: [parent] });
-  if (typeof content === "string") return {
-    contentType: `multipart/related; boundary=${boundary}`,
-    body: `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n${content}\r\n--${boundary}--`,
-  };
-  const prefix = new TextEncoder().encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`);
-  const suffix = new TextEncoder().encode(`\r\n--${boundary}--`);
-  const body = new Uint8Array(prefix.length + content.byteLength + suffix.length);
-  body.set(prefix); body.set(new Uint8Array(content), prefix.length); body.set(suffix, prefix.length + content.byteLength);
-  return { contentType: `multipart/related; boundary=${boundary}`, body: body.buffer };
+export function createRemote(api: PluginAPI, accessToken: string, rootFolderId: string, name: string, content: string | ArrayBuffer, mimeType: string): Promise<DriveFile> {
+  const drive = driveClient(api);
+  return typeof content === "string"
+    ? drive.createFile(accessToken, name, content, rootFolderId, mimeType)
+    : drive.createFileBinary(accessToken, name, content, rootFolderId, mimeType);
 }
 
-export async function createRemote(api: PluginAPI, accessToken: string, rootFolderId: string, name: string, content: string | ArrayBuffer, mimeType: string): Promise<DriveFile> {
-  const payload = multipart(name, content, mimeType, rootFolderId);
-  const response = await driveRequest(api, `${UPLOAD}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents`, accessToken, { method: "POST", contentType: payload.contentType, body: payload.body });
-  return response.json as DriveFile;
-}
-
-export async function updateRemote(api: PluginAPI, accessToken: string, id: string, content: string | ArrayBuffer, mimeType: string): Promise<DriveFile> {
-  const response = await driveRequest(api, `${UPLOAD}/files/${encodeURIComponent(id)}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,md5Checksum,size,parents`, accessToken, { method: "PATCH", contentType: mimeType, body: content });
-  return response.json as DriveFile;
+export function updateRemote(api: PluginAPI, accessToken: string, id: string, content: string | ArrayBuffer, mimeType: string): Promise<DriveFile> {
+  const drive = driveClient(api);
+  return typeof content === "string"
+    ? drive.updateFile(accessToken, id, content, mimeType)
+    : drive.updateFileBinary(accessToken, id, content, mimeType);
 }
 
 export async function renameRemote(api: PluginAPI, accessToken: string, id: string, name: string): Promise<void> {
-  await driveRequest(api, `${API}/files/${encodeURIComponent(id)}?fields=id`, accessToken, { method: "PATCH", contentType: "application/json", body: JSON.stringify({ name }) });
+  await driveClient(api).renameFile(accessToken, id, name);
 }
 
-export async function ensureFolder(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<string> {
-  const query = encodeURIComponent(`name='${escapeQuery(name)}' and '${escapeQuery(rootFolderId)}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-  const listed = (await driveRequest(api, `${API}/files?q=${query}&fields=files(id)&pageSize=1`, accessToken)).json as { files?: Array<{ id: string }> };
-  if (listed.files?.[0]) return listed.files[0].id;
-  const created = (await driveRequest(api, `${API}/files?fields=id`, accessToken, { method: "POST", contentType: "application/json", body: JSON.stringify({ name, mimeType: "application/vnd.google-apps.folder", parents: [rootFolderId] }) })).json as { id: string };
-  return created.id;
+export function ensureFolder(api: PluginAPI, accessToken: string, rootFolderId: string, name: string): Promise<string> {
+  return driveClient(api).ensureSubFolder(accessToken, rootFolderId, name);
 }
 
-/** Same naming scheme as GemiHub's saveConflictBackup: path separators become
- * underscores and a timestamp is inserted before the extension. */
+/** Shared, reversible conflict backup name (gemihub-sync-core/conflict). */
 export function conflictBackupName(path: string, now = new Date()): string {
   return buildConflictBackupName(path, now);
 }
 
 export async function moveRemote(api: PluginAPI, accessToken: string, id: string, from: string, to: string): Promise<void> {
-  await driveRequest(api, `${API}/files/${encodeURIComponent(id)}?addParents=${encodeURIComponent(to)}&removeParents=${encodeURIComponent(from)}&fields=id`, accessToken, { method: "PATCH" });
+  await driveClient(api).moveFile(accessToken, id, to, from);
 }
 
 export function metaFromFiles(files: DriveFile[]): SyncMeta {
