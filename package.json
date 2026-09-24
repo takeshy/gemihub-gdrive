@@ -13,5 +13,8 @@
     "@types/react-dom": "^19.2.5",
     "esbuild": "^0.25.0",
     "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "gemihub-sync-core": "github:takeshy/gemihub-sync-core#c53a18af6acb50b7d6fa4cbecc4e4ea51db91f5d"
   }
 }

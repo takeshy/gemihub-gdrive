@@ -34,18 +34,8 @@ export interface PluginAPI {
 export interface FileActionTarget { scope: "workspace" | "files"; path: string; name: string; isDirectory: boolean }
 export interface FileAction { id: string; label: string; when?(target: FileActionTarget): boolean; onClick(target: FileActionTarget): void | Promise<void> }
 
-export interface FileSyncMeta {
-  name: string;
-  mimeType: string;
-  md5Checksum: string;
-  modifiedTime: string;
-  createdTime?: string;
-  shared?: boolean;
-  webViewLink?: string;
-  size?: string;
-}
-
-export interface SyncMeta { lastUpdatedAt: string; files: Record<string, FileSyncMeta> }
+// `_sync-meta.json` schema shared with GemiHub web and Obsidian.
+export type { FileSyncMeta, SyncMeta } from "gemihub-sync-core/protocol";
 export interface LocalSyncMeta {
   workspaceId: string;
   lastUpdatedAt: string;

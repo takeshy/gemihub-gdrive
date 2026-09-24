@@ -1,15 +1,19 @@
 import { request, type TransportResponse } from "./transport";
-import type { FileSyncMeta, PluginAPI, SyncMeta } from "./types";
+import { buildConflictBackupName } from "gemihub-sync-core/conflict";
+import { isGoogleWorkspaceMimeType, isSyncExcludedPath } from "gemihub-sync-core/paths";
+import { reconcileSyncMetaWithListing, syncMetaFromDriveFiles } from "gemihub-sync-core/protocol";
+import type { PluginAPI, SyncMeta } from "./types";
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
-export const SYSTEM_NAMES = new Set(["_sync-meta.json", "_encrypted-auth.json", "settings.json"]);
-export const SYSTEM_PREFIXES = ["history/", "trash/", "sync_conflicts/", "GemiHub/conflict-backups/", "__TEMP__/", "plugins/"];
+// System names/folders, exclusion patterns and conflict names are shared with
+// GemiHub web and Obsidian through gemihub-sync-core.
+export { SYNC_EXCLUDED_FILE_NAMES as SYSTEM_NAMES, SYNC_EXCLUDED_PREFIXES as SYSTEM_PREFIXES, isUserExcludedPath } from "gemihub-sync-core/paths";
 
 export interface DriveFile { id: string; name: string; mimeType: string; modifiedTime?: string; createdTime?: string; parents?: string[]; md5Checksum?: string; size?: string }
 
 export function isGoogleWorkspaceFile(file: Pick<DriveFile, "mimeType">): boolean {
-  return file.mimeType.startsWith("application/vnd.google-apps.");
+  return isGoogleWorkspaceMimeType(file.mimeType);
 }
 
 export function syncableDriveFile(file: Pick<DriveFile, "name" | "mimeType">): boolean {
@@ -17,25 +21,10 @@ export function syncableDriveFile(file: Pick<DriveFile, "name" | "mimeType">): b
 }
 
 function escapeQuery(value: string): string { return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'"); }
+
+/** Desktop keeps workspace state in `.llm-hub/`; everything else is the shared rule. */
 export function syncablePath(path: string): boolean {
-  const clean = path.replace(/^\/+/, "");
-  return !!clean && !SYSTEM_NAMES.has(clean) && !SYSTEM_PREFIXES.some((prefix) => clean.startsWith(prefix)) && !clean.split("/").some((part) => part === ".git" || part === ".llm-hub" || part === "node_modules");
-}
-
-/** A trailing `/` excludes a folder and everything under it; otherwise the
- * pattern is a glob (`*`/`?`) matched against the full path or its basename. */
-function matchesExcludePattern(path: string, pattern: string): boolean {
-  const trimmed = pattern.trim();
-  if (!trimmed) return false;
-  if (trimmed.endsWith("/")) return path === trimmed.slice(0, -1) || path.startsWith(trimmed);
-  const escaped = trimmed.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
-  const regex = new RegExp(`^${escaped}$`);
-  return regex.test(path) || regex.test(path.split("/").pop() ?? "");
-}
-
-export function isUserExcludedPath(path: string, patterns: string[]): boolean {
-  const clean = path.replace(/^\/+/, "");
-  return patterns.some((pattern) => matchesExcludePattern(clean, pattern));
+  return !isSyncExcludedPath(path, { extraSegments: [".llm-hub"] });
 }
 
 async function driveRequest(api: PluginAPI, url: string, accessToken: string, options: { method?: string; headers?: Record<string, string>; body?: string | ArrayBuffer; contentType?: string } = {}, retries = 2): Promise<TransportResponse> {
@@ -124,10 +113,7 @@ export async function ensureFolder(api: PluginAPI, accessToken: string, rootFold
 /** Same naming scheme as GemiHub's saveConflictBackup: path separators become
  * underscores and a timestamp is inserted before the extension. */
 export function conflictBackupName(path: string, now = new Date()): string {
-  const timestamp = now.toISOString().replace(/[-:]/g, "").replace("T", "_").replace("Z", "").replace(".", "_");
-  const safe = path.replace(/\//g, "_");
-  const dot = safe.lastIndexOf(".");
-  return dot > 0 ? `${safe.slice(0, dot)}_${timestamp}${safe.slice(dot)}` : `${safe}_${timestamp}`;
+  return buildConflictBackupName(path, now);
 }
 
 export async function moveRemote(api: PluginAPI, accessToken: string, id: string, from: string, to: string): Promise<void> {
@@ -135,12 +121,7 @@ export async function moveRemote(api: PluginAPI, accessToken: string, id: string
 }
 
 export function metaFromFiles(files: DriveFile[]): SyncMeta {
-  return {
-    lastUpdatedAt: new Date().toISOString(),
-    files: Object.fromEntries(files.filter(syncableDriveFile).map((file) => [file.id, {
-      name: file.name, mimeType: file.mimeType, md5Checksum: file.md5Checksum ?? "", modifiedTime: file.modifiedTime ?? "", createdTime: file.createdTime, size: file.size,
-    } satisfies FileSyncMeta])),
-  };
+  return syncMetaFromDriveFiles(files, syncableDriveFile);
 }
 
 /**
@@ -150,19 +131,7 @@ export function metaFromFiles(files: DriveFile[]): SyncMeta {
  * relying on one of those files alone hides newly-created and deleted files.
  */
 export function reconcileSyncMeta(meta: SyncMeta | null, files: DriveFile[]): SyncMeta {
-  const live = metaFromFiles(files);
-  if (!meta) return live;
-  live.lastUpdatedAt = meta.lastUpdatedAt || live.lastUpdatedAt;
-  for (const [id, file] of Object.entries(live.files)) {
-    const previous = meta.files?.[id];
-    if (previous) live.files[id] = {
-      ...previous,
-      ...file,
-      createdTime: file.createdTime ?? previous.createdTime,
-      size: file.size ?? previous.size,
-    };
-  }
-  return live;
+  return reconcileSyncMetaWithListing(meta, files, syncableDriveFile);
 }
 
 function syncMetaSignature(value: SyncMeta): string {

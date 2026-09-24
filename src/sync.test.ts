@@ -18,11 +18,12 @@ Deno.test("finds local files that need to be pushed for FileTree decorations", (
 });
 
 Deno.test("classifies only known text extensions as text", () => {
-  for (const path of ["notes/readme.md", "data/view.yaml", "boards/work.dashboard", "scores/song.audioscore", "src/main.tsx", "image.svg"]) {
+  // Shared GemiHub rule: extensionless files are text, SVG is an image.
+  for (const path of ["notes/readme.md", "data/view.yaml", "boards/work.dashboard", "scores/song.audioscore", "src/main.tsx", "unknown"]) {
     assertEquals(isTextPath(path), true, path);
     assertEquals(isBinaryPath(path), false, path);
   }
-  for (const path of ["scores/song.mid", "scores/song.midi", "docs/file.pdf", "audio/track.wav", "unknown", "archive.custom"]) {
+  for (const path of ["scores/song.mid", "scores/song.midi", "docs/file.pdf", "audio/track.wav", "image.svg", "archive.custom"]) {
     assertEquals(isTextPath(path), false, path);
     assertEquals(isBinaryPath(path), true, path);
   }

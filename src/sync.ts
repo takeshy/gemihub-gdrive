@@ -1,30 +1,19 @@
 import { createConnection, refreshSession, unlockConnection, type Session, type StoredConnection } from "./auth";
 import { conflictBackupName, createRemote, ensureFolder, isUserExcludedPath, listRootFiles, metaFromFiles, moveRemote, readRemote, readSyncMeta, renameRemote, syncablePath, updateRemote, writeSyncMeta } from "./drive";
+import { guessMimeType, shouldTreatAsBinaryFile } from "gemihub-sync-core/files";
+import { duplicateRemotePaths as coreDuplicateRemotePaths, syncMetaSnapshotChanged } from "gemihub-sync-core/protocol";
 import type { ConflictInfo, FileSyncMeta, LocalSyncMeta, PluginAPI, Workspace, WorkspaceFile, SyncMeta, SyncProgress, SyncStatus, SyncSummary, WorkspaceFilesAPI } from "./types";
 
 const CONNECTION_KEY = "connection";
 const SNAPSHOT_KEY = "syncSnapshot";
 export const EXCLUDE_PATTERNS_KEY = "excludePatterns";
-const TEXT_EXTENSIONS = new Set([
-  "base", "c", "cc", "cfg", "conf", "cpp", "css", "csv", "dashboard",
-  "go", "h", "hpp", "htm", "html", "ini", "java", "js", "json",
-  "jsonl", "jsx", "kanban", "log", "markdown", "md", "mjs", "cjs",
-  "py", "rb", "rs", "sh", "sql", "svg", "toml", "ts", "tsx", "txt",
-  "workflow", "xml", "yaml", "yml", "audioscore",
-]);
+// Text/binary classification and MIME types come from the table shared with
+// GemiHub web and Obsidian (gemihub-sync-core/files).
+export function isTextPath(path: string): boolean { return !shouldTreatAsBinaryFile(path); }
 
-export function isTextPath(path: string): boolean {
-  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  const dot = name.lastIndexOf(".");
-  return dot >= 0 && TEXT_EXTENSIONS.has(name.slice(dot + 1));
-}
+export function isBinaryPath(path: string): boolean { return shouldTreatAsBinaryFile(path); }
 
-export function isBinaryPath(path: string): boolean { return !isTextPath(path); }
-
-function mimeType(path: string): string {
-  const extension = path.split(".").pop()?.toLowerCase() ?? "";
-  return ({ md: "text/markdown", markdown: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json", html: "text/html", css: "text/css", js: "application/javascript", ts: "text/typescript", xml: "application/xml", yaml: "application/x-yaml", yml: "application/x-yaml", base: "text/plain", kanban: "text/plain", dashboard: "text/plain", audioscore: "application/json", svg: "image/svg+xml", mid: "audio/midi", midi: "audio/midi", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", epub: "application/epub+zip" } as Record<string, string>)[extension] ?? (isTextPath(path) ? "text/plain" : "application/octet-stream");
-}
+function mimeType(path: string): string { return guessMimeType(path); }
 
 function decodeDataURL(value: string): ArrayBuffer {
   const encoded = value.includes(",") ? value.slice(value.indexOf(",") + 1) : value;
@@ -40,25 +29,11 @@ function pathKey(path: string, caseInsensitive = false): string { return caseIns
 function isWindowsWorkspace(workspace: Workspace): boolean { return /^[a-z]:[\\/]/i.test(workspace.path) || workspace.path.startsWith("\\\\"); }
 
 export function duplicateRemotePaths(remote: SyncMeta, caseInsensitive = false): string[] {
-  const groups = new Map<string, string[]>();
-  for (const file of Object.values(remote.files)) {
-    const key = pathKey(file.name, caseInsensitive);
-    const names = groups.get(key) ?? [];
-    names.push(file.name); groups.set(key, names);
-  }
-  return [...groups.values()].filter((names) => names.length > 1).map((names) => names[0]).sort((a, b) => a.localeCompare(b));
+  return coreDuplicateRemotePaths(remote.files, caseInsensitive);
 }
 
 export function remoteSnapshotChanged(expected: SyncMeta, current: SyncMeta): boolean {
-  const expectedIds = Object.keys(expected.files).sort();
-  const currentIds = Object.keys(current.files).sort();
-  if (expectedIds.length !== currentIds.length || expectedIds.some((id, index) => id !== currentIds[index])) return true;
-  return expectedIds.some((id) => {
-    const before = expected.files[id], after = current.files[id];
-    if (before.name !== after.name) return true;
-    if (before.md5Checksum && after.md5Checksum) return before.md5Checksum !== after.md5Checksum;
-    return before.modifiedTime !== after.modifiedTime;
-  });
+  return syncMetaSnapshotChanged(expected.files, current.files);
 }
 
 function resolveLocalIds(inventory: WorkspaceFile[], baseline: LocalSyncMeta, caseInsensitive = false): Map<string, string> {

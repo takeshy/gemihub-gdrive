@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "gemihub-sync-core": "./node_modules/gemihub-sync-core/dist/index.js",
+    "gemihub-sync-core/protocol": "./node_modules/gemihub-sync-core/dist/protocol/index.js",
+    "gemihub-sync-core/paths": "./node_modules/gemihub-sync-core/dist/paths/index.js",
+    "gemihub-sync-core/files": "./node_modules/gemihub-sync-core/dist/files/index.js",
+    "gemihub-sync-core/conflict": "./node_modules/gemihub-sync-core/dist/conflict/index.js"
+  }
+}
