@@ -1,8 +1,8 @@
 /// <reference lib="deno.ns" />
-import { assertEquals } from "jsr:@std/assert";
-import { adoptResolvedConflicts, computeLocalChangePaths, computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
+import { assertCurrentDuplicate, duplicateRemoteGroups, DuplicateRemoteError, WorkspaceDriveSync, adoptResolvedConflicts, computeLocalChangePaths, computeSnapshot, computeStatus, duplicateRemotePaths, isBinaryPath, isTextPath, parallelForEach, planPush, remoteSnapshotChanged, unresolvedBaselineEntries } from "./sync.ts";
 import { isGoogleWorkspaceFile, reconcileSyncMeta, syncableDriveFile } from "./drive.ts";
-import type { LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
+import type { HTTPResponse, PluginAPI, LocalSyncMeta, WorkspaceFile, SyncMeta } from "./types.ts";
 
 const local = (path: string, md5: string): WorkspaceFile => ({ path, md5, size: 1, createdTime: 0, modTime: 0, binary: false });
 const baseline = (md5 = "a"): LocalSyncMeta => ({ workspaceId: "p", lastUpdatedAt: "", files: { id: { name: "notes/a.md", md5Checksum: md5 } }, pathToId: { "notes/a.md": "id" } });
@@ -344,4 +344,78 @@ Deno.test("sync worker pool limits concurrency", async () => {
   }, 5);
   assertEquals(maximum, 5);
   assertEquals(completed, 17);
+});
+
+Deno.test("duplicate groups preserve every identity and reject stale choices", () => {
+  const value = remote();
+  value.files.second = { ...value.files.id, md5Checksum: "different" };
+  value.files.third = { ...value.files.id };
+  const group = duplicateRemoteGroups(value)[0];
+  assertEquals(group.files.map(({ id }) => id), ["id", "second", "third"]);
+  assertEquals(assertCurrentDuplicate(group, value), group);
+  const changed = structuredClone(value);
+  changed.files.second.md5Checksum = "new edit";
+  assertThrows(() => assertCurrentDuplicate(group, changed), Error, "changed");
+  delete changed.files.second;
+  assertThrows(() => assertCurrentDuplicate(group, changed), Error, "changed");
+  const caseVariants = remote();
+  caseVariants.files.second = { ...caseVariants.files.id, name: "NOTES/A.md" };
+  assertEquals(duplicateRemoteGroups(caseVariants).length, 0);
+  assertEquals(duplicateRemoteGroups(caseVariants, true).length, 1);
+});
+
+Deno.test("duplicate resolution previews all copies, archives only losers, and preserves local conflicts", async () => {
+  const current = remote("selected");
+  current.files.other = { ...current.files.id, md5Checksum: "old" };
+  current.files.third = { ...current.files.id, md5Checksum: "third" };
+  const saved = baseline("old");
+  saved.files = { other: saved.files.id };
+  saved.pathToId = { "notes/a.md": "other" };
+  const workspace = { id: "p", name: "test", path: "/test" };
+  const storage: Record<string, unknown> = { connection: { workspace }, syncSnapshot: saved };
+  const moved: string[] = [];
+  const writes: string[] = [];
+  const ok = (value: unknown): HTTPResponse => ({ status: 200, headers: {}, body: typeof value === "string" ? value : JSON.stringify(value), bodyBase64: "" });
+  const api = {
+    language: "en", registerView() {},
+    storage: { get: (key: string) => Promise.resolve(structuredClone(storage[key])), set: (key: string, value: unknown) => { storage[key] = structuredClone(value); return Promise.resolve(); } },
+    workspaceFiles: { current: () => Promise.resolve(workspace), inventory: () => Promise.resolve([local("notes/a.md", "local edit")]) },
+    network: { request: (request: { url: string; method: string; body?: string }) => {
+      const url = new URL(request.url);
+      const id = url.pathname.split("/").at(-1)!;
+      if (url.pathname.startsWith("/upload/")) { writes.push(request.body!); return Promise.resolve(ok({ id: "meta" })); }
+      if (request.method === "PATCH") {
+        assertEquals(url.searchParams.get("addParents"), "trash-id");
+        assertEquals(url.searchParams.get("removeParents"), "root");
+        moved.push(id); delete current.files[id]; return Promise.resolve(ok({ id }));
+      }
+      if (url.searchParams.get("alt") === "media") return Promise.resolve(ok(id === "meta" ? current : `content of ${id}`));
+      const query = url.searchParams.get("q") ?? "";
+      if (query.includes("_sync-meta.json")) return Promise.resolve(ok({ files: [{ id: "meta", name: "_sync-meta.json" }] }));
+      if (/name\s*=\s*'trash'/.test(query)) return Promise.resolve(ok({ files: [{ id: "trash-id", name: "trash", mimeType: "application/vnd.google-apps.folder" }] }));
+      return Promise.resolve(ok({ files: Object.entries(current.files).map(([id, file]) => ({ id, ...file })) }));
+    } },
+  } as unknown as PluginAPI;
+  const client = new WorkspaceDriveSync(api);
+  Object.defineProperty(client, "tokens", { value: () => Promise.resolve({ accessToken: "token", rootFolderId: "root" }) });
+  await assertRejects(() => client.status(), DuplicateRemoteError);
+  assertEquals(moved, []);
+  const group = duplicateRemoteGroups(structuredClone(current))[0];
+  assertEquals(await client.duplicatePreview(group), { id: "content of id", other: "content of other", third: "content of third" });
+  await assertRejects(() => client.resolveDuplicate(group, "invalid"), Error, "Choose a file");
+  assertEquals(moved, []);
+  current.files.third.md5Checksum = "changed";
+  await assertRejects(() => client.resolveDuplicate(group, "id"), Error, "changed");
+  assertEquals(moved, []);
+  current.files.third.md5Checksum = "third";
+  await client.resolveDuplicate(group, "id");
+  assertEquals(moved, ["other", "third"]);
+  assertEquals(Object.keys(current.files), ["id"]);
+  assertEquals(writes.length, 1);
+  const updated = storage.syncSnapshot as LocalSyncMeta;
+  assertEquals(updated.pathToId, { "notes/a.md": "id" });
+  assertEquals(updated.files.id.md5Checksum, "old");
+  const status = await client.status();
+  assertEquals(status.conflicts.map(({ id, kind }) => ({ id, kind })), [{ id: "id", kind: "edit" }]);
+  assertEquals(status.remoteDeletes, []);
 });

@@ -32,6 +32,34 @@ export function duplicateRemotePaths(remote: SyncMeta, caseInsensitive = false):
   return coreDuplicateRemotePaths(remote.files, caseInsensitive);
 }
 
+export interface DuplicateGroup { path: string; files: { id: string; file: FileSyncMeta }[] }
+
+export function duplicateRemoteGroups(remote: SyncMeta, caseInsensitive = false): DuplicateGroup[] {
+  const groups = new Map<string, DuplicateGroup>();
+  for (const [id, file] of Object.entries(remote.files)) {
+    const key = pathKey(file.name, caseInsensitive);
+    const group = groups.get(key) ?? { path: file.name, files: [] };
+    group.files.push({ id, file }); groups.set(key, group);
+  }
+  return [...groups.values()].filter((group) => group.files.length > 1);
+}
+
+export class DuplicateRemoteError extends Error {
+  constructor(public groups: DuplicateGroup[]) {
+    super("Google Drive has duplicate paths. Review the copies below and choose which one to keep.");
+    this.name = "DuplicateRemoteError";
+  }
+}
+
+export function assertCurrentDuplicate(requested: DuplicateGroup, remote: SyncMeta, caseInsensitive = false): DuplicateGroup {
+  const current = duplicateRemoteGroups(remote, caseInsensitive).find((group) => pathKey(group.path, caseInsensitive) === pathKey(requested.path, caseInsensitive));
+  const snapshot = (group: DuplicateGroup): SyncMeta => ({ lastUpdatedAt: "", files: Object.fromEntries(group.files.map(({ id, file }) => [id, file])) });
+  if (!current || remoteSnapshotChanged(snapshot(requested), snapshot(current))) {
+    throw new Error("These Drive copies changed. Run Check again before choosing.");
+  }
+  return current;
+}
+
 export function remoteSnapshotChanged(expected: SyncMeta, current: SyncMeta): boolean {
   return syncMetaSnapshotChanged(expected.files, current.files);
 }
@@ -307,11 +335,47 @@ export class WorkspaceDriveSync {
     // rewriting `_sync-meta.json`) still preserves their entries untouched.
     const remote: SyncMeta = patterns.length ? { ...rawRemote, files: Object.fromEntries(Object.entries(rawRemote.files).filter(([, file]) => !isUserExcludedPath(file.name, patterns))) } : rawRemote;
     const caseInsensitive = isWindowsWorkspace(connection.workspace);
-    const duplicates = duplicateRemotePaths(remote, caseInsensitive);
-    if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
+    const duplicates = duplicateRemoteGroups(remote, caseInsensitive);
+    if (duplicates.length) throw new DuplicateRemoteError(duplicates);
     return { session, inventory, baseline, remote, status: computeStatus(inventory, baseline, remote, caseInsensitive) };
   }
   async status(): Promise<SyncStatus> { return (await this.state()).status; }
+  async duplicatePreview(group: DuplicateGroup): Promise<Record<string, string>> {
+    const connection = await this.assertWorkspace();
+    const session = await this.tokens();
+    const remote = await readSyncMeta(this.api, session.accessToken, session.rootFolderId);
+    const current = assertCurrentDuplicate(group, remote, isWindowsWorkspace(connection.workspace));
+    const entries = await Promise.all(current.files.map(async ({ id, file }) =>
+      [id, isTextPath(file.name) ? (await readRemote(this.api, session.accessToken, id)).text : "Binary file — compare size and checksum above."] as const));
+    return Object.fromEntries(entries);
+  }
+
+  /** Keep the chosen Drive identity; preserve all other copies in GemiHub trash. */
+  async resolveDuplicate(group: DuplicateGroup, keepId: string): Promise<void> {
+    const connection = await this.assertWorkspace();
+    const session = await this.tokens();
+    const remote = await readSyncMeta(this.api, session.accessToken, session.rootFolderId);
+    const current = assertCurrentDuplicate(group, remote, isWindowsWorkspace(connection.workspace));
+    if (!current.files.some(({ id }) => id === keepId)) throw new Error("Choose a file from this duplicate group.");
+    const baseline = await this.snapshot(connection.workspace.id);
+    const trash = await ensureFolder(this.api, session.accessToken, session.rootFolderId, "trash");
+    for (const { id } of current.files) {
+      if (id !== keepId) await moveRemote(this.api, session.accessToken, id, session.rootFolderId, trash);
+    }
+    // Transfer the previous synchronized content to the chosen identity. This
+    // preserves local edits and lets normal conflict handling compare both sides.
+    const ids = new Set(current.files.map(({ id }) => id));
+    const previousId = Object.entries(baseline.pathToId).find(([path, id]) =>
+      pathKey(path, isWindowsWorkspace(connection.workspace)) === pathKey(group.path, isWindowsWorkspace(connection.workspace)) && ids.has(id))?.[1];
+    const previous = previousId ? baseline.files[previousId] : undefined;
+    for (const id of ids) delete baseline.files[id];
+    for (const [path, id] of Object.entries(baseline.pathToId)) if (ids.has(id)) delete baseline.pathToId[path];
+    if (previous) { baseline.files[keepId] = previous; baseline.pathToId[previous.name] = keepId; }
+    await this.api.storage!.set(SNAPSHOT_KEY, baseline);
+    const next = metaFromFiles(await listRootFiles(this.api, session.accessToken, session.rootFolderId));
+    await writeSyncMeta(this.api, session.accessToken, session.rootFolderId, next);
+  }
+
   async localChangePaths(): Promise<string[]> {
     const connection = await this.connection();
     if (!connection) return [];
@@ -425,8 +489,8 @@ export class WorkspaceDriveSync {
       .filter((file) => !isUserExcludedPath(file.name, patterns));
     const latestRemote = metaFromFiles(latestFiles);
     const caseInsensitive = isWindowsWorkspace(connection.workspace);
-    const duplicates = duplicateRemotePaths(latestRemote, caseInsensitive);
-    if (duplicates.length) throw new Error(`Google Drive contains duplicate file paths: ${duplicates.join(", ")}. Rename or remove duplicates before syncing.`);
+    const duplicates = duplicateRemoteGroups(latestRemote, caseInsensitive);
+    if (duplicates.length) throw new DuplicateRemoteError(duplicates);
     if (remoteSnapshotChanged(remote, latestRemote)) throw new Error("Google Drive changed after the sync check. Run Check again before pushing.");
 
     const summary: SyncSummary = { created: 0, updated: 0, renamed: 0, deleted: 0, skipped: 0 };

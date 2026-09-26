@@ -16,6 +16,7 @@ GemiHub Desktopのactive Workspace全体を、GemiHubが利用するGoogle Drive
 - text/binary、pathを含むflat Drive filename、renameに対応
 - Pullはlocalに未Pushの変更があっても実行可能（該当ファイルはスキップして保持）
 - 両側で変更されたファイルはconflictとしてファイルごとに`Keep local` / `Keep remote`で解消（選ばれなかった側はDriveの`sync_conflicts/`へタイムスタンプ付きでバックアップ）
+- Driveに同じパスのファイルが複数ある場合は、`Check` → `View all copies`で内容・更新日時・IDを確認し、`Keep this copy`で残すコピーを選択（他のコピーはGemiHubの`trash`へ退避。ローカルは変更せず、通常のPull/競合解決で反映）
 - Pushによるremote削除はGemiHubの`trash/`へ移動
 - Pullによるlocal削除は実行前に確認
 - Pull/Pushは実行前にnew、modified、deleted、conflictの対象ファイル一覧を表示

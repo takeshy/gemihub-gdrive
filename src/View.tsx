@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { isTextPath, WorkspaceDriveSync, type ConflictPreview } from "./sync";
+import { DuplicateRemoteError, isTextPath, WorkspaceDriveSync, type DuplicateGroup, type ConflictPreview } from "./sync";
 import type { ConflictInfo, PluginAPI, SyncProgress, SyncStatus, SyncSummary } from "./types";
 import { showToast } from "./toast";
 import { refreshDriveDecorations } from "./decorations";
@@ -87,6 +87,8 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   const [token, setToken] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([]);
+  const [duplicateContents, setDuplicateContents] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<SyncProgress | null>(null);
@@ -108,25 +110,30 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setMessage(""); setProgress(null);
-    try { await action(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    try { await action(); } catch (error) {
+      if (error instanceof DuplicateRemoteError) {
+        setDuplicates(error.groups); setDuplicateContents({}); setStatus(null); setPreview(null); setStatDetail(null);
+      }
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
     finally { setBusy(false); setProgress(null); }
   };
 
   const refresh = async () => {
-    const next = await client.status();
+    const next = await client.status(); setDuplicates([]);
     setStatus(next); setPreview(null); setStatDetail(null); setMessage(countStatus(next));
     await refreshDriveDecorations(api);
   };
 
   const prepare = async (direction: PreviewDirection) => {
-    const next = await client.status();
+    const next = await client.status(); setDuplicates([]);
     setStatus(next); setPreview(direction); setStatDetail(null); setMessage(countStatus(next));
   };
 
   const toggleStatDetail = (key: StatKey) => { setPreview(null); setStatDetail((current) => (current === key ? null : key)); };
 
   const push = async () => {
-    const next = await client.status(); setStatus(next);
+    const next = await client.status(); setDuplicates([]); setStatus(next);
     const deletions = next.localDeletes.length;
     if (deletions && !window.confirm(`Push will move ${deletions} file(s) to GemiHub trash. Continue?`)) return;
     showToast(`Push complete: ${summary(await client.push(deletions > 0))}`);
@@ -135,7 +142,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
   };
 
   const pull = async () => {
-    const next = await client.status(); setStatus(next);
+    const next = await client.status(); setDuplicates([]); setStatus(next);
     const deletions = next.remoteDeletes.length;
     showToast(`Pull complete: ${summary(await client.pull(deletions > 0, setProgress))}`);
     setStatus(await client.status()); setPreview(null); setStatDetail(null);
@@ -144,7 +151,7 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
 
   const resolve = async (targets: ConflictInfo[], choice: "local" | "remote") => {
     const resolved = await client.resolveConflicts(targets.map((conflict) => ({ conflict, choice, backup: !skipConflictBackups })));
-    const next = await client.status(); setStatus(next);
+    const next = await client.status(); setDuplicates([]); setStatus(next);
     setConflictPreviews({});
     setMessage(`Resolved ${resolved} conflict(s). ${countStatus(next)}`);
     await refreshDriveDecorations(api);
@@ -177,6 +184,28 @@ export function DriveSyncView({ api }: { api: PluginAPI }) {
       <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => { await client.reset(); setConnection(null); setStatus(null); showToast("Connection reset."); })}>Reset connection</button>
     </div> : <div className="gdrive-actions">
       <div className="gdrive-workspace"><span>Workspace</span><strong>{connection.workspace.name}</strong><small>{connection.workspace.path}</small></div>
+      {duplicates.length ? <div className="gdrive-preview gdrive-conflicts">
+        <div className="gdrive-preview-header"><strong>Duplicate Drive paths</strong><span>{duplicates.length} path(s)</span></div>
+        <p>各コピーを確認して、元のパスに残すファイルを選んでください。他のコピーは復元可能なGemiHubのtrashへ移動します。ローカルの内容は変更しません。</p>
+        {duplicates.map((group) => <div key={group.path}>
+          <strong>{group.path}</strong>
+          <button type="button" className="secondary" disabled={busy} onClick={() => void run(async () => {
+            const contents = await client.duplicatePreview(group);
+            setDuplicateContents((previous) => ({ ...previous, ...contents }));
+          })}>View all copies</button>
+          <ul>{group.files.map(({ id, file }) => <li key={id} className="is-conflict">
+            <div className="gdrive-conflict-file"><span>{file.name}</span><small>ID: {id}</small>
+              <small>Updated: {file.modifiedTime || "unknown"} · Size: {file.size ?? "unknown"} · MD5: {file.md5Checksum || "unknown"}</small>
+            </div>
+            <button type="button" disabled={busy} onClick={() => void run(async () => {
+              await client.resolveDuplicate(group, id);
+              setDuplicateContents({});
+              await refresh();
+            })}>Keep this copy</button>
+            {duplicateContents[id] !== undefined ? <div className="gdrive-conflict-detail"><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "24rem", overflow: "auto" }}>{duplicateContents[id]}</pre></div> : null}
+          </li>)}</ul>
+        </div>)}
+      </div> : null}
       {status && <div className="gdrive-status-grid">
         <button type="button" className={statDetail === "local" ? "is-open" : ""} onClick={() => toggleStatDetail("local")}>Local changes <b>{status.localChanges.length + status.localOnly.length}</b></button>
         <button type="button" className={statDetail === "remote" ? "is-open" : ""} onClick={() => toggleStatDetail("remote")}>Remote changes <b>{status.remoteChanges.length + status.remoteOnly.length}</b></button>
